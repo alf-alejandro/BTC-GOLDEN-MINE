@@ -922,11 +922,9 @@ def _run_test_cycle() -> dict:
         ob_test   = res["pasos"]["4_orderbooks"][ob_key]
         test_bid  = ob_test["bid"]
         test_price = round(test_bid + 0.001, 4)
-        # Usar $1.01 fijo para la prueba (funciona con cualquier saldo > $1)
-        test_usd  = 1.01
-        test_size = round(test_usd / test_price, 2) if test_price > 0 else 5.0
-        if test_size < 1.0:
-            test_size = 1.0
+        # Minimo de Polymarket: 5 tokens (~$2-3 segun el precio)
+        test_usd  = round(5.0 * test_price, 2)
+        test_size = 5.0
 
         order_args   = OrderArgs(price=test_price, size=test_size, side=BUY,
                                  token_id=test_token, fee_rate_bps=1000)
