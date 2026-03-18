@@ -833,8 +833,8 @@ def _run_test_cycle() -> dict:
     try:
         from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
         ba  = clob.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
-        bal = float(ba.get("balance", 0))
-        alw = float(ba.get("allowance", 0))
+        bal = float(ba.get("balance", 0)) / 1_000_000
+        alw = float(ba.get("allowance", 0)) / 1_000_000
         res["pasos"]["2_saldo"] = {"ok": True, "usdc": round(bal, 2), "allowance": round(alw, 2)}
         if bal < MIN_USD_ORDEN * 2:
             res["pasos"]["2_saldo"]["advertencia"] = "Saldo muy bajo para operar"
@@ -975,7 +975,7 @@ def _refrescar_balance_real():
         from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
         params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
         ba  = clob.get_balance_allowance(params)
-        bal = float(ba.get("balance", 0))
+        bal = float(ba.get("balance", 0)) / 1_000_000
         if bal > 0:
             _balance_real         = bal
             _ts_ultimo_balance    = time.time()
@@ -1007,11 +1007,11 @@ def _get_polymarket_balance() -> dict:
             from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
             params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
             ba = clob.get_balance_allowance(params)
-            # ba es un dict con "balance" y "allowance"
-            bal = float(ba.get("balance", 0))
+            # ba es un dict con "balance" y "allowance" en unidades mínimas (6 decimales)
+            bal = float(ba.get("balance", 0)) / 1_000_000
             result["usdc_label"]   = f"${bal:,.2f} USDC"
             result["usdc_clob"]    = round(bal, 4)
-            result["allowance"]    = round(float(ba.get("allowance", 0)), 4)
+            result["allowance"]    = round(float(ba.get("allowance", 0)) / 1_000_000, 4)
             result["ok"] = True
         except Exception as e:
             result["clob_balance_error"] = str(e)
