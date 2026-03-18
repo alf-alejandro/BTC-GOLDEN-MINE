@@ -720,6 +720,13 @@ async function checkBalance() {
       </div>`;
     }
 
+    if (d.allowance !== undefined) {
+      html += `<div class="modal-row">
+        <span class="modal-key">Allowance aprobado</span>
+        <span class="modal-val">$${d.allowance.toFixed(2)}</span>
+      </div>`;
+    }
+
     if (d.open_orders !== undefined) {
       html += `<div class="modal-row">
         <span class="modal-key">Ordenes abiertas</span>

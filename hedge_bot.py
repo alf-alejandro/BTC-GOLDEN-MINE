@@ -795,57 +795,64 @@ async def main_loop():
 
 def _get_polymarket_balance() -> dict:
     """
-    Consulta el saldo USDC de la cuenta en la red Polygon (sin API key).
-    Usa eth_call al contrato USDC directamente via RPC publico.
-    Tambien intenta obtener el saldo via py-clob-client si esta disponible.
+    Consulta el saldo USDC via la API del CLOB de Polymarket.
+    El USDC no esta en el wallet directamente sino en el contrato del exchange.
+    El endpoint /balance-allowance es la fuente correcta.
+    Como fallback, tambien revisa ambos contratos USDC en Polygon.
     """
+    import requests as req
     result = {"address": PROXY_ADDRESS or "no configurado"}
 
-    # ── 1. Saldo USDC en Polygon via RPC publico ──────────────────────────────
-    USDC_POLYGON = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-    RPC_URLS = [
-        "https://polygon-rpc.com",
-        "https://rpc.ankr.com/polygon",
-    ]
-    if PROXY_ADDRESS:
-        padded = PROXY_ADDRESS.lower().replace("0x", "").zfill(64)
-        call_data = f"0x70a08231{padded}"  # balanceOf(address)
-        payload = {
-            "jsonrpc": "2.0",
-            "method": "eth_call",
-            "params": [{"to": USDC_POLYGON, "data": call_data}, "latest"],
-            "id": 1,
-        }
-        for rpc in RPC_URLS:
-            try:
-                import requests as req
-                r = req.post(rpc, json=payload, timeout=8)
-                hex_val = r.json().get("result", "0x0")
-                usdc = int(hex_val, 16) / 1e6
-                result["usdc_polygon"] = round(usdc, 4)
-                result["usdc_label"]   = f"${usdc:,.2f} USDC"
-                result["ok"] = True
-                break
-            except Exception as e:
-                result["rpc_error"] = str(e)
-
-    # ── 2. Info adicional via py-clob-client ──────────────────────────────────
+    # ── 1. Saldo via API CLOB (fuente correcta — USDC en el exchange) ─────────
     if clob:
         try:
-            # Intentar get_balance_allowance si existe en esta version
-            ba = clob.get_balance_allowance(params=None)
-            result["clob_balance"] = ba
-        except Exception:
-            pass
+            # py-clob-client 0.19: get_balance_allowance con AssetType.COLLATERAL
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            ba = clob.get_balance_allowance(params)
+            # ba es un dict con "balance" y "allowance"
+            bal = float(ba.get("balance", 0))
+            result["usdc_label"]   = f"${bal:,.2f} USDC"
+            result["usdc_clob"]    = round(bal, 4)
+            result["allowance"]    = round(float(ba.get("allowance", 0)), 4)
+            result["ok"] = True
+        except Exception as e:
+            result["clob_balance_error"] = str(e)
 
         try:
-            # Alternativa: obtener ordenes activas como proxy de conexion ok
             open_orders = clob.get_orders()
             result["open_orders"] = len(open_orders) if open_orders else 0
             result["clob_ok"] = True
         except Exception as e:
             result["clob_ok"] = False
             result["clob_msg"] = str(e)
+
+    # ── 2. Fallback: USDC en wallet Polygon (USDC.e + native USDC) ────────────
+    if not result.get("ok") and PROXY_ADDRESS:
+        USDC_CONTRACTS = {
+            "USDC.e": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+            "USDC":   "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+        }
+        RPC_URLS = ["https://polygon-rpc.com", "https://rpc.ankr.com/polygon"]
+        padded   = PROXY_ADDRESS.lower().replace("0x", "").zfill(64)
+        total    = 0.0
+        for name, contract in USDC_CONTRACTS.items():
+            call_data = f"0x70a08231{padded}"
+            payload   = {"jsonrpc": "2.0", "method": "eth_call",
+                         "params": [{"to": contract, "data": call_data}, "latest"], "id": 1}
+            for rpc in RPC_URLS:
+                try:
+                    r = req.post(rpc, json=payload, timeout=8)
+                    hex_val = r.json().get("result", "0x0")
+                    bal = int(hex_val, 16) / 1e6
+                    result[f"wallet_{name}"] = round(bal, 4)
+                    total += bal
+                    break
+                except Exception:
+                    pass
+        if total > 0:
+            result["usdc_label"] = f"${total:,.2f} USDC (wallet)"
+            result["ok"] = True
 
     return result
 
