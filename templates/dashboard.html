@@ -91,6 +91,8 @@
   .btn-csv:hover { background: rgba(0,212,255,.08); }
   .btn-bal   { background: transparent; color: var(--yellow); border: 1px solid var(--yellow); }
   .btn-bal:hover { background: rgba(255,211,42,.08); }
+  .btn-test  { background: transparent; color: var(--orange); border: 1px solid var(--orange); }
+  .btn-test:hover { background: rgba(255,107,53,.08); }
 
   /* Modal saldo */
   .modal-overlay {
@@ -272,6 +274,7 @@
     <button class="btn btn-stop"  id="btn-stop"  onclick="stopBot()" disabled>&#9632; STOP</button>
     <button class="btn btn-csv"   onclick="downloadCSV()">&#8681; CSV</button>
     <button class="btn btn-bal"   onclick="checkBalance()" id="btn-balance">&#9679; SALDO</button>
+    <button class="btn btn-test"  onclick="runTest()"     id="btn-test">&#9881; TEST</button>
   </div>
 </header>
 
@@ -411,6 +414,19 @@
       <div class="modal-spinner">Consultando la red Polygon...</div>
     </div>
     <button class="modal-close" onclick="document.getElementById('balance-overlay').classList.remove('open')">Cerrar</button>
+  </div>
+</div>
+
+<!-- Modal test -->
+<div class="modal-overlay" id="test-overlay" onclick="closeTest(event)">
+  <div class="modal" style="min-width:480px;max-width:680px;max-height:80vh;overflow-y:auto">
+    <div class="modal-title">&#9881; Diagnostico de Prueba</div>
+    <div id="test-content">
+      <div class="modal-spinner">Ejecutando ciclo de prueba...</div>
+    </div>
+    <button class="modal-close" onclick="document.getElementById('test-overlay').classList.remove('open')">Cerrar</button>
+    <button class="modal-close" id="btn-copy-json" style="margin-top:6px;background:var(--border2);display:none"
+      onclick="copyJson()">Copiar JSON completo</button>
   </div>
 </div>
 
@@ -772,6 +788,106 @@ async function checkBalance() {
 function closeBalance(event) {
   if (event.target === document.getElementById('balance-overlay')) {
     document.getElementById('balance-overlay').classList.remove('open');
+  }
+}
+
+// ── TEST ──────────────────────────────────────────────────────────────────────
+let _lastTestJson = null;
+
+async function runTest() {
+  document.getElementById('test-overlay').classList.add('open');
+  document.getElementById('btn-copy-json').style.display = 'none';
+  document.getElementById('test-content').innerHTML =
+    '<div class="modal-spinner">Ejecutando ciclo de prueba completo...<br><small style="color:var(--muted)">Esto puede tardar hasta 30 segundos</small></div>';
+
+  document.getElementById('btn-test').disabled = true;
+  _lastTestJson = null;
+
+  try {
+    const r = await fetch('/api/test');
+    const d = await r.json();
+    _lastTestJson = d;
+    renderTest(d);
+  } catch(e) {
+    document.getElementById('test-content').innerHTML =
+      `<div class="modal-spinner" style="color:var(--red)">Error de conexion: ${e.message}</div>`;
+  } finally {
+    document.getElementById('btn-test').disabled = false;
+  }
+}
+
+function renderTest(d) {
+  const ok = d.ok;
+  const pasos = d.pasos || {};
+  const iconOk  = '<span style="color:var(--green)">&#10003;</span>';
+  const iconFail = '<span style="color:var(--red)">&#10007;</span>';
+
+  const labels = {
+    '1_clob_auth':    'Auth CLOB',
+    '2_saldo':        'Saldo USDC',
+    '3_mercado':      'Mercado activo',
+    '4_orderbooks':   'Order Books',
+    '5_senal':        'Senal OBI',
+    '6_orden_prueba': 'Orden prueba',
+  };
+
+  let html = '';
+
+  // Veredicto
+  html += `<div style="padding:12px 0 16px;font-size:13px;font-weight:700;
+    color:${ok ? 'var(--green)' : 'var(--red)'}">
+    ${ok ? '&#10003;' : '&#10007;'} ${d.veredicto}
+  </div>`;
+
+  // Tabla de pasos
+  html += '<div style="border:1px solid var(--border);border-radius:4px;overflow:hidden">';
+  for (const [key, val] of Object.entries(pasos)) {
+    const label  = labels[key] || key;
+    const estado = val.ok ? iconOk : iconFail;
+
+    // Resumen por paso
+    let detalle = '';
+    if (key === '1_clob_auth' && val.ok)
+      detalle = `ordenes abiertas: ${val.ordenes_abiertas}`;
+    else if (key === '2_saldo' && val.ok)
+      detalle = `USDC: $${val.usdc?.toLocaleString('en-US')} | allowance: $${val.allowance?.toLocaleString('en-US')}`;
+    else if (key === '3_mercado' && val.ok)
+      detalle = `${val.question} | ${val.segundos_restantes}s restantes`;
+    else if (key === '4_orderbooks' && val.ok)
+      detalle = `UP ask=${val.UP?.ask} obi=${val.UP?.obi} | DN ask=${val.DN?.ask} obi=${val.DN?.obi}`;
+    else if (key === '5_senal' && val.ok)
+      detalle = `UP:${val.UP?.label}(${val.UP?.combined}) DN:${val.DN?.label}(${val.DN?.combined}) | entraria:${val.entraria}`;
+    else if (key === '6_orden_prueba' && val.ok)
+      detalle = `${val.order_id?.slice(0,16)}... | ${val.accion}`;
+    else if (!val.ok)
+      detalle = val.error || '';
+
+    html += `<div style="display:flex;align-items:flex-start;gap:10px;padding:8px 12px;
+      border-bottom:1px solid var(--border);font-family:var(--mono);font-size:11px">
+      <span style="min-width:14px">${estado}</span>
+      <span style="min-width:120px;color:var(--text)">${label}</span>
+      <span style="color:var(--muted);word-break:break-all">${detalle}</span>
+    </div>`;
+  }
+  html += '</div>';
+
+  document.getElementById('test-content').innerHTML = html;
+  document.getElementById('btn-copy-json').style.display = 'block';
+}
+
+function copyJson() {
+  if (!_lastTestJson) return;
+  navigator.clipboard.writeText(JSON.stringify(_lastTestJson, null, 2))
+    .then(() => {
+      const btn = document.getElementById('btn-copy-json');
+      btn.textContent = 'JSON copiado!';
+      setTimeout(() => { btn.textContent = 'Copiar JSON completo'; }, 2000);
+    });
+}
+
+function closeTest(event) {
+  if (event.target === document.getElementById('test-overlay')) {
+    document.getElementById('test-overlay').classList.remove('open');
   }
 }
 

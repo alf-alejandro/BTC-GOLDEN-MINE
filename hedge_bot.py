@@ -799,6 +799,157 @@ async def main_loop():
         await asyncio.sleep(POLL_INTERVAL)
 
 
+# ─── CICLO DE PRUEBA COMPLETO ─────────────────────────────────────────────────
+
+def _run_test_cycle() -> dict:
+    """
+    Ejecuta un ciclo completo de diagnostico SIN arriesgar dinero real:
+      1. Autenticacion CLOB
+      2. Saldo USDC real
+      3. Mercado activo
+      4. Order books (UP y DOWN)
+      5. Evaluacion de senal OBI
+      6. Orden de prueba minima → colocada → cancelada inmediatamente
+    Retorna JSON con el resultado de cada paso.
+    """
+    res = {"ts": datetime.now().isoformat(), "pasos": {}, "ok": False, "veredicto": ""}
+
+    # ── Paso 1: Auth CLOB ─────────────────────────────────────────────────────
+    try:
+        orders = clob.get_orders()
+        res["pasos"]["1_clob_auth"] = {"ok": True, "ordenes_abiertas": len(orders or [])}
+    except Exception as e:
+        res["pasos"]["1_clob_auth"] = {"ok": False, "error": str(e)}
+        res["veredicto"] = f"FALLO en autenticacion CLOB: {e}"
+        return res
+
+    # ── Paso 2: Saldo USDC ───────────────────────────────────────────────────
+    try:
+        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+        ba  = clob.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+        bal = float(ba.get("balance", 0))
+        alw = float(ba.get("allowance", 0))
+        res["pasos"]["2_saldo"] = {"ok": True, "usdc": round(bal, 2), "allowance": round(alw, 2)}
+        if bal < MIN_USD_ORDEN * 2:
+            res["pasos"]["2_saldo"]["advertencia"] = "Saldo muy bajo para operar"
+    except Exception as e:
+        res["pasos"]["2_saldo"] = {"ok": False, "error": str(e)}
+
+    # ── Paso 3: Mercado activo ────────────────────────────────────────────────
+    try:
+        mkt = find_active_market(SYMBOL)
+        if not mkt:
+            res["pasos"]["3_mercado"] = {"ok": False, "error": "No hay mercado activo ahora"}
+            res["veredicto"] = "FALLO: sin mercado activo (puede que estes entre ciclos, reintenta en unos segundos)"
+            return res
+        secs = seconds_remaining(mkt)
+        res["pasos"]["3_mercado"] = {
+            "ok":                 True,
+            "question":           mkt.get("question", ""),
+            "end_date":           mkt.get("end_date", ""),
+            "segundos_restantes": round(secs, 1) if secs else None,
+            "up_token_id":        mkt["up_token_id"][:20] + "...",
+            "down_token_id":      mkt["down_token_id"][:20] + "...",
+        }
+    except Exception as e:
+        res["pasos"]["3_mercado"] = {"ok": False, "error": str(e)}
+        res["veredicto"] = f"FALLO buscando mercado: {e}"
+        return res
+
+    # ── Paso 4: Order books ───────────────────────────────────────────────────
+    try:
+        up_m, eu = get_order_book_metrics(mkt["up_token_id"])
+        dn_m, ed = get_order_book_metrics(mkt["down_token_id"])
+        if not up_m or not dn_m:
+            res["pasos"]["4_orderbooks"] = {"ok": False, "error": eu or ed}
+            res["veredicto"] = "FALLO: order books no disponibles"
+            return res
+        res["pasos"]["4_orderbooks"] = {
+            "ok": True,
+            "UP": {"bid": up_m["best_bid"], "ask": up_m["best_ask"],
+                   "obi": up_m["obi"], "spread": up_m["spread"],
+                   "bid_vol": up_m["bid_volume"], "ask_vol": up_m["ask_volume"]},
+            "DN": {"bid": dn_m["best_bid"], "ask": dn_m["best_ask"],
+                   "obi": dn_m["obi"], "spread": dn_m["spread"],
+                   "bid_vol": dn_m["bid_volume"], "ask_vol": dn_m["ask_volume"]},
+        }
+    except Exception as e:
+        res["pasos"]["4_orderbooks"] = {"ok": False, "error": str(e)}
+        res["veredicto"] = f"FALLO leyendo order books: {e}"
+        return res
+
+    # ── Paso 5: Evaluacion de senal ───────────────────────────────────────────
+    try:
+        sig_up = compute_signal(up_m["obi"], [up_m["obi"]], OBI_THRESHOLD)
+        sig_dn = compute_signal(dn_m["obi"], [dn_m["obi"]], OBI_THRESHOLD)
+
+        # Elegir el lado con mayor signal para la orden de prueba
+        if sig_up["combined"] >= sig_dn["combined"]:
+            test_lado, test_ask, test_token = "UP",   up_m["best_ask"], mkt["up_token_id"]
+        else:
+            test_lado, test_ask, test_token = "DOWN", dn_m["best_ask"], mkt["down_token_id"]
+
+        in_ventana    = ENTRY_WINDOW_MIN < (secs or 0) <= ENTRY_WINDOW_MAX
+        in_precio     = PRECIO_MIN_LADO1 <= test_ask <= PRECIO_MAX_LADO1
+        spread_ok     = up_m["spread"] <= SPREAD_MAX and dn_m["spread"] <= SPREAD_MAX
+
+        res["pasos"]["5_senal"] = {
+            "ok":          True,
+            "UP":          {"label": sig_up["label"], "combined": sig_up["combined"]},
+            "DN":          {"label": sig_dn["label"], "combined": sig_dn["combined"]},
+            "lado_test":   test_lado,
+            "ask_test":    test_ask,
+            "ventana_ok":  in_ventana,
+            "precio_ok":   in_precio,
+            "spread_ok":   spread_ok,
+            "entraria":    in_ventana and in_precio and spread_ok,
+        }
+    except Exception as e:
+        res["pasos"]["5_senal"] = {"ok": False, "error": str(e)}
+        res["veredicto"] = f"FALLO evaluando senal: {e}"
+        return res
+
+    # ── Paso 6: Orden minima real → cancelacion inmediata ─────────────────────
+    try:
+        test_size  = 5.0          # minimo absoluto de Polymarket
+        test_price = test_ask
+
+        order_args   = OrderArgs(price=test_price, size=test_size, side=BUY, token_id=test_token)
+        signed_order = clob.create_order(order_args)
+        resp         = clob.post_order(signed_order, OrderType.GTC)
+
+        if "orderID" not in resp:
+            res["pasos"]["6_orden_prueba"] = {"ok": False, "error": f"API rechazo la orden: {resp}"}
+            res["veredicto"] = "FALLO: la API rechazo la orden de prueba"
+            return res
+
+        order_id = resp["orderID"]
+        time.sleep(0.5)
+        clob.cancel(order_id)
+
+        res["pasos"]["6_orden_prueba"] = {
+            "ok":       True,
+            "order_id": order_id,
+            "lado":     test_lado,
+            "precio":   test_price,
+            "size":     test_size,
+            "accion":   "COLOCADA y CANCELADA exitosamente (sin costo real)",
+        }
+    except Exception as e:
+        res["pasos"]["6_orden_prueba"] = {"ok": False, "error": str(e)}
+        res["veredicto"] = f"FALLO en orden de prueba: {e}"
+        return res
+
+    # ── Veredicto final ───────────────────────────────────────────────────────
+    res["ok"] = True
+    orden_size = round(estado["capital"] * MAX_PCT_POR_LADO, 2)
+    res["veredicto"] = (
+        f"TODO OK — Listo para operar. "
+        f"Ordenes reales de ${orden_size:.2f} USD por lado ({MAX_PCT_POR_LADO*100:.1f}% del capital)."
+    )
+    return res
+
+
 # ─── REFRESCO DE SALDO REAL ───────────────────────────────────────────────────
 
 def _refrescar_balance_real():
@@ -916,6 +1067,8 @@ if __name__ == "__main__":
                     self._serve_csv()
                 elif self.path == "/api/balance":
                     self._serve_balance()
+                elif self.path == "/api/test":
+                    self._serve_test()
                 else:
                     self._send(404, "text/plain", b"Not found")
             except Exception as e:
@@ -1012,6 +1165,13 @@ if __name__ == "__main__":
                 self._send(200, "application/json", json.dumps(data).encode())
             except Exception as e:
                 self._send(500, "application/json", json.dumps({"error": str(e)}).encode())
+
+        def _serve_test(self):
+            try:
+                resultado = _run_test_cycle()
+                self._send(200, "application/json", json.dumps(resultado, indent=2).encode())
+            except Exception as e:
+                self._send(500, "application/json", json.dumps({"ok": False, "error": str(e)}).encode())
 
         def _send(self, code, ctype, body):
             self.send_response(code)
