@@ -1204,6 +1204,9 @@ if __name__ == "__main__":
     # Inicializar cliente CLOB con credenciales reales
     init_clob()
 
+    # Cargar balance real antes de arrancar el servidor — así el KPI ya muestra el saldo
+    _refrescar_balance_real()
+
     # Arrancar servidor web PRIMERO — Railway necesita que / responda antes del healthcheck
     t = threading.Thread(target=run_server, daemon=True)
     t.start()
