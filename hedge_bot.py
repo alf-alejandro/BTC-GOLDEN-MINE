@@ -110,6 +110,7 @@ def init_clob():
 # ─── ESTADO GLOBAL ────────────────────────────────────────────────────────────
 estado = {
     "capital":      CAPITAL_INICIAL,
+    "capital_base": 0.0,          # primer balance real — base del ROI
     "pnl_total":    0.0,
     "peak_capital": CAPITAL_INICIAL,
     "max_drawdown": 0.0,
@@ -153,7 +154,8 @@ _balance_real           = 0.0   # ultimo saldo USDC confirmado por el CLOB
 def guardar_estado(up_m=None, dn_m=None):
     total = estado["wins"] + estado["losses"]
     wr    = estado["wins"] / total * 100 if total > 0 else 0.0
-    roi   = (estado["capital"] - CAPITAL_INICIAL) / CAPITAL_INICIAL * 100
+    _base = estado["capital_base"] if estado["capital_base"] > 0 else CAPITAL_INICIAL
+    roi   = (estado["capital"] - _base) / _base * 100
 
     ob_up = {
         "ask": round(up_m["best_ask"], 4),
@@ -294,7 +296,8 @@ def imprimir_estado(up_m, dn_m, secs, signal_up, signal_dn):
     sep   = "-" * 65
     total = estado["wins"] + estado["losses"]
     wr    = estado["wins"] / total * 100 if total > 0 else 0
-    roi   = (estado["capital"] - CAPITAL_INICIAL) / CAPITAL_INICIAL * 100
+    _base = estado["capital_base"] if estado["capital_base"] > 0 else CAPITAL_INICIAL
+    roi   = (estado["capital"] - _base) / _base * 100
 
     print(f"\n{sep}")
     print(f"  Capital: ${estado['capital']:.2f}  PnL: ${estado['pnl_total']:+.2f}  ROI: {roi:+.1f}%  MaxDD: ${estado['max_drawdown']:.2f}")
@@ -980,6 +983,8 @@ def _refrescar_balance_real():
             _balance_real         = bal
             _ts_ultimo_balance    = time.time()
             estado["capital"]     = bal
+            if estado["capital_base"] == 0.0:
+                estado["capital_base"] = bal   # fijar base del ROI en primer fetch
             estado["peak_capital"] = max(estado["peak_capital"], bal)
             log_ev(f"Balance real actualizado: ${bal:,.2f} USDC")
     except Exception as e:
@@ -1226,5 +1231,6 @@ if __name__ == "__main__":
         guardar_estado()
         total = estado["wins"] + estado["losses"]
         wr    = estado["wins"] / total * 100 if total > 0 else 0
-        roi   = (estado["capital"] - CAPITAL_INICIAL) / CAPITAL_INICIAL * 100
+        _base = estado["capital_base"] if estado["capital_base"] > 0 else CAPITAL_INICIAL
+    roi   = (estado["capital"] - _base) / _base * 100
         print(f"\nCapital: ${estado['capital']:.2f} | ROI: {roi:+.1f}% | W:{estado['wins']} L:{estado['losses']} WR:{wr:.0f}%")
