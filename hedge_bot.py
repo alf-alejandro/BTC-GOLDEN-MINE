@@ -141,6 +141,7 @@ pos = {
 eventos      = deque(maxlen=100)
 mkt_end_date = None
 mkt_global   = None   # mercado activo (necesario para token_ids en ordenes)
+bot_activo   = False  # arranca PAUSADO — el usuario activa desde el dashboard
 
 
 # ─── PERSISTENCIA ─────────────────────────────────────────────────────────────
@@ -189,6 +190,7 @@ def guardar_estado(up_m=None, dn_m=None):
                     "capital_usado": round(pos["capital_usado"], 4),
                 },
                 "mkt_end_date": mkt_end_date,
+                "bot_activo":   bot_activo,
                 "eventos": list(eventos)[-30:],
                 "trades":  estado["trades"][-20:],
             }, f, indent=2)
@@ -469,6 +471,8 @@ def evaluar_senal(up_m, dn_m):
 # ─── ENTRADA LADO 1 ───────────────────────────────────────────────────────────
 
 async def intentar_entrada(up_m, dn_m, secs, loop) -> bool:
+    if not bot_activo:
+        return False
     if pos["activa"]:
         return False
     if secs is None or not (ENTRY_WINDOW_MIN < secs <= ENTRY_WINDOW_MAX):
@@ -679,7 +683,7 @@ def _registrar_trade(tipo, exit_precio, resuelto, outcome, pnl):
 # ─── LOOP PRINCIPAL ───────────────────────────────────────────────────────────
 
 async def main_loop():
-    global mkt_global, mkt_end_date
+    global mkt_global, mkt_end_date, bot_activo
 
     log_ev("=" * 65)
     log_ev(f"  HEDGE BOT LIVE v8 — {SYMBOL} Up/Down 5m en Polymarket")
@@ -699,6 +703,12 @@ async def main_loop():
 
     while True:
         try:
+            # 0. Si el bot esta pausado, solo guardar estado y esperar
+            if not bot_activo:
+                guardar_estado()
+                await asyncio.sleep(2)
+                continue
+
             # 1. Descubrir mercado
             if mkt_global is None:
                 log_ev(f"Buscando mercado {SYMBOL} Up/Down 5m...")
@@ -875,10 +885,22 @@ if __name__ == "__main__":
                 self._send(500, "text/plain", str(e).encode())
 
         def do_POST(self):
+            global bot_activo
             if self.path == "/api/start":
-                self._send(200, "application/json", b'{"ok":true,"msg":"Bot ya corriendo"}')
+                bot_activo = True
+                log_ev("Bot ACTIVADO desde el dashboard.")
+                guardar_estado()
+                self._send(200, "application/json", b'{"ok":true}')
             elif self.path == "/api/stop":
-                self._send(200, "application/json", b'{"ok":false,"msg":"Stop no disponible en Railway"}')
+                bot_activo = False
+                log_ev("Bot PAUSADO desde el dashboard.")
+                try:
+                    clob.cancel_all()
+                    log_ev("Ordenes canceladas al pausar.")
+                except Exception:
+                    pass
+                guardar_estado()
+                self._send(200, "application/json", b'{"ok":true}')
             else:
                 self._send(404, "text/plain", b"Not found")
 

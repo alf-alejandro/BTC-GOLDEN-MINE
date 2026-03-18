@@ -506,14 +506,15 @@ async function fetchTrades() {
 function updateDashboard(d) {
   CAPITAL_INICIAL = d.capital_inicial || CAPITAL_INICIAL;
 
-  const ahora   = Date.now();
-  const tsBot   = d.ts ? new Date(d.ts).getTime() : 0;
-  const running = (ahora - tsBot) < 10000;
-  document.getElementById('status-dot').className   = 'status-dot' + (running ? ' running' : '');
-  document.getElementById('status-text').textContent = running ? 'RUNNING' : 'STOPPED';
-  document.getElementById('status-text').style.color = running ? 'var(--green)' : 'var(--muted)';
-  document.getElementById('btn-start').disabled = running;
-  document.getElementById('btn-stop').disabled  = !running;
+  const ahora    = Date.now();
+  const tsBot    = d.ts ? new Date(d.ts).getTime() : 0;
+  const online   = (ahora - tsBot) < 10000;   // servidor respondiendo
+  const activo   = !!d.bot_activo;             // bot operando
+  document.getElementById('status-dot').className    = 'status-dot' + (activo ? ' running' : '');
+  document.getElementById('status-text').textContent = activo ? 'OPERANDO' : (online ? 'PAUSADO' : 'OFFLINE');
+  document.getElementById('status-text').style.color = activo ? 'var(--green)' : online ? 'var(--yellow)' : 'var(--muted)';
+  document.getElementById('btn-start').disabled = activo;
+  document.getElementById('btn-stop').disabled  = !activo;
 
   setEl('kpi-capital',      `$${(d.capital||0).toFixed(2)}`);
   setEl('kpi-capital-init', `Inicial: $${CAPITAL_INICIAL.toFixed(2)}`);
@@ -671,16 +672,18 @@ async function startBot() {
   try {
     const r = await fetch('/api/start', { method: 'POST' });
     const d = await r.json();
-    if (!d.ok) alert(d.msg || 'Error al iniciar');
+    if (!d.ok) alert('Error al iniciar');
+    else fetchStatus();
   } catch(e) { alert('No se pudo conectar con el servidor'); }
 }
 
 async function stopBot() {
-  if (!confirm('Detener el bot?')) return;
+  if (!confirm('Pausar el bot y cancelar ordenes abiertas?')) return;
   try {
     const r = await fetch('/api/stop', { method: 'POST' });
     const d = await r.json();
-    if (!d.ok) alert(d.msg || 'Error al detener');
+    if (!d.ok) alert('Error al pausar');
+    else fetchStatus();
   } catch(e) { alert('No se pudo conectar con el servidor'); }
 }
 
