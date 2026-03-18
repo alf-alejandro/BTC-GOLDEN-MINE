@@ -326,10 +326,10 @@ def imprimir_estado(up_m, dn_m, secs, signal_up, signal_dn):
 
 # ─── COMPRA CON ORDEN REAL (Maker Entry — GTC al ask) ─────────────────────────
 
-async def comprar_live(lado: str, token_id: str, ask: float, loop) -> tuple[float, float, float]:
+async def comprar_live(lado: str, token_id: str, ask: float, bid: float, loop) -> tuple[float, float, float]:
     """
-    Coloca una orden GTC BUY al precio ask (Maker Entry).
-    Espera hasta ORDER_FILL_TIMEOUT segundos por el fill.
+    Maker Entry: coloca GTC BUY al bid+0.001 (fee_rate_bps=0, sin fee).
+    El orden entra al libro como maker; si el mercado viene a ese precio se llena.
     Retorna (precio, shares, usd) o (0, 0, 0) si falla o timeout.
     """
     usd = round(estado["capital"] * MAX_PCT_POR_LADO, 4)
@@ -342,15 +342,18 @@ async def comprar_live(lado: str, token_id: str, ask: float, loop) -> tuple[floa
         log_ev(f"  x Capital insuficiente: ${estado['capital']:.2f}")
         return 0.0, 0.0, 0.0
 
-    shares = round(usd / ask, 2)
+    # Precio maker: bid + 0.001 (debajo del ask, entra al libro sin cruzar)
+    maker_price = round(bid + 0.001, 4)
+    shares      = round(usd / maker_price, 2)
     if shares < 5.0:
         shares = 5.0
-    costo_real = round(shares * ask, 4)
+    costo_real = round(shares * maker_price, 4)
 
-    log_ev(f"  Colocando BUY {lado} @ {ask:.4f} | {shares} tokens | ${costo_real:.2f}")
+    log_ev(f"  Colocando BUY maker {lado} @ {maker_price:.4f} (bid={bid:.4f} ask={ask:.4f}) | {shares} tokens | ${costo_real:.2f}")
 
     try:
-        order_args   = OrderArgs(price=ask, size=shares, side=BUY, token_id=token_id)
+        order_args   = OrderArgs(price=maker_price, size=shares, side=BUY,
+                                 token_id=token_id, fee_rate_bps=0)
         signed_order = await loop.run_in_executor(None, clob.create_order, order_args)
         resp         = await loop.run_in_executor(None, lambda: clob.post_order(signed_order, OrderType.GTC))
 
@@ -365,16 +368,16 @@ async def comprar_live(lado: str, token_id: str, ask: float, loop) -> tuple[floa
         log_ev(f"  x Error al colocar orden BUY: {e}")
         return 0.0, 0.0, 0.0
 
-    # Esperar fill
+    # Esperar fill (el fill llega cuando un vendedor acepta nuestro precio)
     deadline = time.time() + ORDER_FILL_TIMEOUT
     while time.time() < deadline:
         try:
             order_info = await loop.run_in_executor(None, clob.get_order, order_id)
             status = order_info.get("status", "")
             if status in ("FILLED", "MATCHED"):
-                log_ev(f"  FILL BUY {lado} @ {ask:.4f} | {shares} tokens | ${costo_real:.2f}")
+                log_ev(f"  FILL BUY {lado} @ {maker_price:.4f} | {shares} tokens | ${costo_real:.2f}")
                 estado["capital"] -= costo_real
-                return ask, shares, costo_real
+                return maker_price, shares, costo_real
         except Exception as e:
             log_ev(f"  Advertencia al consultar orden: {e}")
 
@@ -401,7 +404,8 @@ async def vender_taker(lado: str, token_id: str, bid: float, shares: float, loop
     log_ev(f"  Colocando SELL taker {lado} @ {exit_precio:.4f} | {shares} tokens")
 
     try:
-        order_args   = OrderArgs(price=exit_precio, size=shares, side=SELL, token_id=token_id)
+        order_args   = OrderArgs(price=exit_precio, size=shares, side=SELL,
+                                 token_id=token_id, fee_rate_bps=1000)
         signed_order = await loop.run_in_executor(None, clob.create_order, order_args)
         resp         = await loop.run_in_executor(None, lambda: clob.post_order(signed_order, OrderType.GTC))
 
@@ -489,12 +493,13 @@ async def intentar_entrada(up_m, dn_m, secs, loop) -> bool:
         return False
 
     ask      = up_m["best_ask"] if lado == "UP" else dn_m["best_ask"]
+    bid      = up_m["best_bid"] if lado == "UP" else dn_m["best_bid"]
     obi      = up_m["obi"]      if lado == "UP" else dn_m["obi"]
     token_id = mkt_global["up_token_id"] if lado == "UP" else mkt_global["down_token_id"]
 
-    log_ev(f"SENAL {lado} — OBI={obi:+.3f} | ask={ask:.4f} | {int(secs)}s restantes")
+    log_ev(f"SENAL {lado} — OBI={obi:+.3f} | bid={bid:.4f} ask={ask:.4f} | {int(secs)}s restantes")
 
-    precio, shares, usd = await comprar_live(lado, token_id, ask, loop)
+    precio, shares, usd = await comprar_live(lado, token_id, ask, bid, loop)
     if usd == 0.0:
         return False
 
@@ -531,15 +536,16 @@ async def intentar_hedge(up_m, dn_m, loop):
         return
 
     ask_lado2 = dn_m["best_ask"] if lado2 == "DOWN" else up_m["best_ask"]
+    bid_lado2 = dn_m["best_bid"] if lado2 == "DOWN" else up_m["best_bid"]
     token_id  = mkt_global["down_token_id"] if lado2 == "DOWN" else mkt_global["up_token_id"]
 
     # v8: rango optimo del hedge 0.25-0.35
     if ask_lado2 <= 0 or ask_lado2 < HEDGE_PRECIO_MIN or ask_lado2 > HEDGE_PRECIO_MAX:
         return
 
-    log_ev(f"  Lado1 subio {subida*100:+.1f}c — hedgeando en {lado2} @ {ask_lado2:.4f}")
+    log_ev(f"  Lado1 subio {subida*100:+.1f}c — hedgeando en {lado2} @ bid={bid_lado2:.4f} ask={ask_lado2:.4f}")
 
-    precio, shares, usd = await comprar_live(lado2, token_id, ask_lado2, loop)
+    precio, shares, usd = await comprar_live(lado2, token_id, ask_lado2, bid_lado2, loop)
     if usd == 0.0:
         return
 
@@ -911,10 +917,14 @@ def _run_test_cycle() -> dict:
 
     # ── Paso 6: Orden minima real → cancelacion inmediata ─────────────────────
     try:
-        test_size  = 5.0          # minimo absoluto de Polymarket
-        test_price = test_ask
+        # Precio maker: bid del lado elegido + 0.001 (no cruza el libro, fee=0)
+        ob_test   = res["pasos"]["4_orderbooks"][test_lado]
+        test_bid  = ob_test["bid"]
+        test_price = round(test_bid + 0.001, 4)
+        test_size  = 5.0   # minimo absoluto de Polymarket
 
-        order_args   = OrderArgs(price=test_price, size=test_size, side=BUY, token_id=test_token)
+        order_args   = OrderArgs(price=test_price, size=test_size, side=BUY,
+                                 token_id=test_token, fee_rate_bps=0)
         signed_order = clob.create_order(order_args)
         resp         = clob.post_order(signed_order, OrderType.GTC)
 
@@ -928,12 +938,14 @@ def _run_test_cycle() -> dict:
         clob.cancel(order_id)
 
         res["pasos"]["6_orden_prueba"] = {
-            "ok":       True,
-            "order_id": order_id,
-            "lado":     test_lado,
-            "precio":   test_price,
-            "size":     test_size,
-            "accion":   "COLOCADA y CANCELADA exitosamente (sin costo real)",
+            "ok":         True,
+            "order_id":   order_id,
+            "lado":       test_lado,
+            "bid":        test_bid,
+            "precio":     test_price,
+            "size":       test_size,
+            "fee_rate":   "0 bps (maker)",
+            "accion":     "COLOCADA y CANCELADA exitosamente (sin costo real)",
         }
     except Exception as e:
         res["pasos"]["6_orden_prueba"] = {"ok": False, "error": str(e)}
