@@ -353,7 +353,7 @@ async def comprar_live(lado: str, token_id: str, ask: float, bid: float, loop) -
 
     try:
         order_args   = OrderArgs(price=maker_price, size=shares, side=BUY,
-                                 token_id=token_id, fee_rate_bps=0)
+                                 token_id=token_id, fee_rate_bps=1000)
         signed_order = await loop.run_in_executor(None, clob.create_order, order_args)
         resp         = await loop.run_in_executor(None, lambda: clob.post_order(signed_order, OrderType.GTC))
 
@@ -929,7 +929,7 @@ def _run_test_cycle() -> dict:
             test_size = 1.0
 
         order_args   = OrderArgs(price=test_price, size=test_size, side=BUY,
-                                 token_id=test_token, fee_rate_bps=0)
+                                 token_id=test_token, fee_rate_bps=1000)
         signed_order = clob.create_order(order_args)
         resp         = clob.post_order(signed_order, OrderType.GTC)
 
@@ -949,7 +949,7 @@ def _run_test_cycle() -> dict:
             "bid":        test_bid,
             "precio":     test_price,
             "size":       test_size,
-            "fee_rate":   "0 bps (maker)",
+            "fee_rate":   "1000 bps",
             "usd_prueba": test_usd,
             "accion":     "COLOCADA y CANCELADA exitosamente (sin costo real)",
         }
