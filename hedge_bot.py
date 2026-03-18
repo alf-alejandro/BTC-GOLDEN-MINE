@@ -918,10 +918,15 @@ def _run_test_cycle() -> dict:
     # ── Paso 6: Orden minima real → cancelacion inmediata ─────────────────────
     try:
         # Precio maker: bid del lado elegido + 0.001 (no cruza el libro, fee=0)
-        ob_test   = res["pasos"]["4_orderbooks"][test_lado]
+        ob_key    = "UP" if test_lado == "UP" else "DN"   # fix: claves son UP/DN
+        ob_test   = res["pasos"]["4_orderbooks"][ob_key]
         test_bid  = ob_test["bid"]
         test_price = round(test_bid + 0.001, 4)
-        test_size  = 5.0   # minimo absoluto de Polymarket
+        # Usar $1.01 fijo para la prueba (funciona con cualquier saldo > $1)
+        test_usd  = 1.01
+        test_size = round(test_usd / test_price, 2) if test_price > 0 else 5.0
+        if test_size < 1.0:
+            test_size = 1.0
 
         order_args   = OrderArgs(price=test_price, size=test_size, side=BUY,
                                  token_id=test_token, fee_rate_bps=0)
@@ -945,6 +950,7 @@ def _run_test_cycle() -> dict:
             "precio":     test_price,
             "size":       test_size,
             "fee_rate":   "0 bps (maker)",
+            "usd_prueba": test_usd,
             "accion":     "COLOCADA y CANCELADA exitosamente (sin costo real)",
         }
     except Exception as e:
