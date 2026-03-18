@@ -288,7 +288,7 @@
     <div class="card">
       <div class="card-label">Capital</div>
       <div class="card-value accent" id="kpi-capital">$&#8212;</div>
-      <div class="card-sub" id="kpi-capital-init">Inicial: $&#8212;</div>
+      <div class="card-sub" id="kpi-capital-init">Actualizado: &#8212;</div>
     </div>
     <div class="card">
       <div class="card-label">PnL Total</div>
@@ -516,8 +516,14 @@ function updateDashboard(d) {
   document.getElementById('btn-start').disabled = activo;
   document.getElementById('btn-stop').disabled  = !activo;
 
-  setEl('kpi-capital',      `$${(d.capital||0).toFixed(2)}`);
-  setEl('kpi-capital-init', `Inicial: $${CAPITAL_INICIAL.toFixed(2)}`);
+  const cap = d.balance_real > 0 ? d.balance_real : (d.capital || 0);
+  setEl('kpi-capital', `$${cap.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}`);
+  if (d.balance_ts) {
+    const mins = Math.floor((Date.now()/1000 - d.balance_ts) / 60);
+    setEl('kpi-capital-init', mins < 1 ? 'Actualizado: ahora' : `Actualizado: hace ${mins}m`);
+  } else {
+    setEl('kpi-capital-init', 'Actualizado: pendiente');
+  }
 
   const pnl   = d.pnl_total || 0;
   const pnlEl = document.getElementById('kpi-pnl');

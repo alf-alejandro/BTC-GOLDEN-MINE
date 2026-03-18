@@ -143,6 +143,10 @@ mkt_end_date = None
 mkt_global   = None   # mercado activo (necesario para token_ids en ordenes)
 bot_activo   = False  # arranca PAUSADO — el usuario activa desde el dashboard
 
+BALANCE_UPDATE_INTERVAL = 600   # refrescar saldo real cada 10 minutos
+_ts_ultimo_balance      = 0.0   # timestamp del ultimo fetch de saldo
+_balance_real           = 0.0   # ultimo saldo USDC confirmado por el CLOB
+
 
 # ─── PERSISTENCIA ─────────────────────────────────────────────────────────────
 
@@ -189,8 +193,10 @@ def guardar_estado(up_m=None, dn_m=None):
                     "hedgeado":      pos["hedgeado"],
                     "capital_usado": round(pos["capital_usado"], 4),
                 },
-                "mkt_end_date": mkt_end_date,
-                "bot_activo":   bot_activo,
+                "mkt_end_date":   mkt_end_date,
+                "bot_activo":     bot_activo,
+                "balance_real":   round(_balance_real, 4),
+                "balance_ts":     _ts_ultimo_balance,
                 "eventos": list(eventos)[-30:],
                 "trades":  estado["trades"][-20:],
             }, f, indent=2)
@@ -683,7 +689,7 @@ def _registrar_trade(tipo, exit_precio, resuelto, outcome, pnl):
 # ─── LOOP PRINCIPAL ───────────────────────────────────────────────────────────
 
 async def main_loop():
-    global mkt_global, mkt_end_date, bot_activo
+    global mkt_global, mkt_end_date, bot_activo, _ts_ultimo_balance
 
     log_ev("=" * 65)
     log_ev(f"  HEDGE BOT LIVE v8 — {SYMBOL} Up/Down 5m en Polymarket")
@@ -708,6 +714,10 @@ async def main_loop():
                 guardar_estado()
                 await asyncio.sleep(2)
                 continue
+
+            # 0b. Refrescar saldo real cada 10 minutos
+            if time.time() - _ts_ultimo_balance > BALANCE_UPDATE_INTERVAL:
+                await loop.run_in_executor(None, _refrescar_balance_real)
 
             # 1. Descubrir mercado
             if mkt_global is None:
@@ -787,6 +797,26 @@ async def main_loop():
             traceback.print_exc()
 
         await asyncio.sleep(POLL_INTERVAL)
+
+
+# ─── REFRESCO DE SALDO REAL ───────────────────────────────────────────────────
+
+def _refrescar_balance_real():
+    """Obtiene el saldo USDC real del CLOB y actualiza estado['capital']."""
+    global _balance_real, _ts_ultimo_balance
+    try:
+        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+        params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+        ba  = clob.get_balance_allowance(params)
+        bal = float(ba.get("balance", 0))
+        if bal > 0:
+            _balance_real         = bal
+            _ts_ultimo_balance    = time.time()
+            estado["capital"]     = bal
+            estado["peak_capital"] = max(estado["peak_capital"], bal)
+            log_ev(f"Balance real actualizado: ${bal:,.2f} USDC")
+    except Exception as e:
+        log_ev(f"Advertencia al refrescar balance: {e}")
 
 
 # ─── ENTRY POINT ──────────────────────────────────────────────────────────────
@@ -895,6 +925,7 @@ if __name__ == "__main__":
             global bot_activo
             if self.path == "/api/start":
                 bot_activo = True
+                _ts_ultimo_balance = 0  # forzar refresco inmediato de balance
                 log_ev("Bot ACTIVADO desde el dashboard.")
                 guardar_estado()
                 self._send(200, "application/json", b'{"ok":true}')
