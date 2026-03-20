@@ -58,7 +58,7 @@ CLOB_HOST = "https://clob.polymarket.com"
 CHAIN_ID  = 137
 
 # ─── PARAMETROS (identicos a hedge_sim.py v8) ─────────────────────────────────
-MAX_PCT_POR_LADO     = 0.015   # 1.5% por lado = 3% total del capital por trade
+USD_POR_LADO         = 3.75    # monto fijo por lado (lado1 + lado2 = $7.50 por trade)
 
 POLL_INTERVAL        = 1.0
 ORDER_FILL_TIMEOUT   = 30.0    # segundos maximos esperando fill de entrada
@@ -134,6 +134,9 @@ pos = {
     "lado2_shares":     0.0,
     "lado2_usd":        0.0,
     "hedgeado":         False,
+    "en_salida":        False,   # True cuando hay early exit pendiente de confirmar
+    "exit_razon":       None,    # razon del early exit (para el log)
+    "exit_intentos":    0,       # cuantos reintentos de venta llevamos
     "capital_usado":    0.0,
     "ts_entrada":       None,
     "secs_entrada":     0.0,
@@ -285,7 +288,7 @@ def actualizar_drawdown():
 
 def resetear_pos():
     for k in pos:
-        if k in ("activa", "hedgeado"):
+        if k in ("activa", "hedgeado", "en_salida"):
             pos[k] = False
         elif isinstance(pos[k], str):
             pos[k] = None
@@ -302,7 +305,7 @@ def imprimir_estado(up_m, dn_m, secs, signal_up, signal_dn):
     print(f"\n{sep}")
     print(f"  Capital: ${estado['capital']:.2f}  PnL: ${estado['pnl_total']:+.2f}  ROI: {roi:+.1f}%  MaxDD: ${estado['max_drawdown']:.2f}")
     print(f"  W:{estado['wins']} L:{estado['losses']} WR:{wr:.0f}%  |  Ciclos: {estado['ciclos']}")
-    print(f"  Orden: ${estado['capital'] * MAX_PCT_POR_LADO:.2f}/lado  ({MAX_PCT_POR_LADO*100:.1f}%)")
+    print(f"  Orden: ${USD_POR_LADO:.2f}/lado (fijo) = ${USD_POR_LADO*2:.2f} total/trade")
 
     if up_m and dn_m:
         print(f"  UP  bid={up_m['best_bid']:.3f} ask={up_m['best_ask']:.3f} mid={mid(up_m):.3f}  OBI={up_m['obi']:+.3f} spread={up_m['spread']:.3f}")
@@ -335,7 +338,7 @@ async def comprar_live(lado: str, token_id: str, ask: float, bid: float, loop) -
     El orden entra al libro como maker; si el mercado viene a ese precio se llena.
     Retorna (precio, shares, usd) o (0, 0, 0) si falla o timeout.
     """
-    usd = round(estado["capital"] * MAX_PCT_POR_LADO, 4)
+    usd = USD_POR_LADO
 
     if usd < MIN_USD_ORDEN:
         log_ev(f"  x Orden muy pequena: ${usd:.2f} < minimo ${MIN_USD_ORDEN:.2f}")
@@ -591,10 +594,21 @@ async def intentar_early_exit(up_m, dn_m, loop):
 
     exit_precio = await vender_taker(lado1, token_id, bid_lado1, pos["lado1_shares"], loop)
     if exit_precio == 0.0:
-        # Venta fallida — asumir cierre a precio minimo para no bloquear el bot
-        exit_precio = 0.01
-        log_ev(f"  EARLY EXIT: venta fallida, asumiendo cierre a {exit_precio:.4f}")
+        # Venta fallida — marcar para reintento continuo, NO abandonar la posicion
+        pos["en_salida"]     = True
+        pos["exit_razon"]    = razon
+        pos["exit_intentos"] = 1
+        log_ev(f"  EARLY EXIT: primer intento fallido — reintentando cada tick hasta confirmar venta")
+        guardar_estado(up_m, dn_m)
+        return
 
+    _cerrar_early_exit(lado1, exit_precio, razon, up_m, dn_m)
+
+
+# ─── CIERRE DE EARLY EXIT (helper compartido) ────────────────────────────────
+
+def _cerrar_early_exit(lado1: str, exit_precio: float, razon: str, up_m, dn_m):
+    """Contabiliza y registra un early exit confirmado (sell llenado)."""
     pnl = round(pos["lado1_shares"] * exit_precio - pos["lado1_usd"], 4)
 
     estado["capital"]   += pos["lado1_usd"] + pnl
@@ -610,6 +624,46 @@ async def intentar_early_exit(up_m, dn_m, loop):
     _registrar_trade("EARLY_EXIT", exit_precio, None, "WIN" if pnl >= 0 else "LOSS", pnl)
     resetear_pos()
     guardar_estado(up_m, dn_m)
+
+
+# ─── REINTENTO PERSISTENTE DE VENTA ──────────────────────────────────────────
+
+async def forzar_salida(up_m, dn_m, loop):
+    """
+    Llamado cada tick cuando pos["en_salida"]=True.
+    Reintenta la venta con precio cada vez mas agresivo hasta confirmar el fill.
+    Bajo ningun concepto resetea la posicion sin haber vendido primero.
+
+    Escalado de precio:
+      intentos 1-3  : bid actual           (taker normal)
+      intentos 4-6  : bid - 0.02           (ligeramente agresivo)
+      intentos 7+   : bid - 0.05 (min 0.01) (dump total — garantiza fill)
+    """
+    lado1    = pos["lado1_side"]
+    intentos = pos["exit_intentos"]
+    bid_raw  = up_m["best_bid"] if lado1 == "UP" else dn_m["best_bid"]
+    token_id = mkt_global["up_token_id"] if lado1 == "UP" else mkt_global["down_token_id"]
+
+    if intentos <= 3:
+        precio_exit = max(round(bid_raw, 4), 0.01)
+    elif intentos <= 6:
+        precio_exit = max(round(bid_raw - 0.02, 4), 0.01)
+    else:
+        precio_exit = max(round(bid_raw - 0.05, 4), 0.01)
+
+    log_ev(f"  REINTENTO VENTA #{intentos} {lado1} @ {precio_exit:.4f} (bid={bid_raw:.4f})")
+
+    pos["exit_intentos"] += 1
+    exit_precio = await vender_taker(lado1, token_id, precio_exit, pos["lado1_shares"], loop)
+
+    if exit_precio == 0.0:
+        log_ev(f"  x Reintento #{intentos} fallido — proximo en siguiente tick")
+        guardar_estado(up_m, dn_m)
+        return
+
+    razon = pos["exit_razon"] or "early_exit"
+    log_ev(f"  Venta confirmada en reintento #{intentos}")
+    _cerrar_early_exit(lado1, exit_precio, razon, up_m, dn_m)
 
 
 # ─── RESOLUCION (identica a hedge_sim.py — Polymarket auto-liquida los ganadores)
@@ -702,7 +756,7 @@ async def main_loop():
 
     log_ev("=" * 65)
     log_ev(f"  HEDGE BOT LIVE v8 — {SYMBOL} Up/Down 5m en Polymarket")
-    log_ev(f"  Capital: ${CAPITAL_INICIAL:.0f} | {MAX_PCT_POR_LADO*100:.1f}%/lado = ${CAPITAL_INICIAL * MAX_PCT_POR_LADO:.2f}/orden")
+    log_ev(f"  Capital: ${CAPITAL_INICIAL:.0f} | Orden fija: ${USD_POR_LADO:.2f}/lado = ${USD_POR_LADO*2:.2f}/trade")
     log_ev(f"  Entrada: precio [{PRECIO_MIN_LADO1:.2f}-{PRECIO_MAX_LADO1:.2f}]")
     log_ev(f"  Hedge:   precio [{HEDGE_PRECIO_MIN:.2f}-{HEDGE_PRECIO_MAX:.2f}] | move_min={HEDGE_MOVE_MIN:.2f}")
     log_ev(f"  Modo: Maker Entry / Taker Exit")
@@ -777,27 +831,31 @@ async def main_loop():
             if pos["activa"]:
                 verificar_resolucion(up_m, dn_m, secs)
 
-            # 5. Early exit si no hay hedge
-            if pos["activa"] and not pos["hedgeado"]:
+            # 5. Reintento persistente de venta si hay early exit pendiente
+            if pos["en_salida"]:
+                await forzar_salida(up_m, dn_m, loop)
+
+            # 6. Early exit si no hay hedge (solo si no estamos ya intentando salir)
+            if pos["activa"] and not pos["hedgeado"] and not pos["en_salida"]:
                 await intentar_early_exit(up_m, dn_m, loop)
 
-            # 6. Intentar hedge
-            if pos["activa"] and not pos["hedgeado"]:
+            # 7. Intentar hedge (solo si no estamos intentando salir)
+            if pos["activa"] and not pos["hedgeado"] and not pos["en_salida"]:
                 await intentar_hedge(up_m, dn_m, loop)
 
-            # 7. Nueva entrada — maximo una por ciclo de mercado
+            # 8. Nueva entrada — maximo una por ciclo de mercado
             if not pos["activa"] and not ya_opero_ciclo:
                 if await intentar_entrada(up_m, dn_m, secs, loop):
                     ya_opero_ciclo = True
 
-            # 8. Senales para display
+            # 9. Senales para display
             signal_up_cache = compute_signal(up_m["obi"], list(obi_history_up), OBI_THRESHOLD)
             signal_dn_cache = compute_signal(dn_m["obi"], list(obi_history_dn), OBI_THRESHOLD)
 
-            # 9. Guardar estado con OB actualizado cada tick
+            # 10. Guardar estado con OB actualizado cada tick
             guardar_estado(up_m, dn_m)
 
-            # 10. Mostrar en logs
+            # 11. Mostrar en logs
             imprimir_estado(up_m, dn_m, secs, signal_up_cache, signal_dn_cache)
 
         except Exception as e:
@@ -808,165 +866,313 @@ async def main_loop():
         await asyncio.sleep(POLL_INTERVAL)
 
 
-# ─── CICLO DE PRUEBA COMPLETO ─────────────────────────────────────────────────
+# ─── PRUEBA DE 3 CICLOS — ESTADO GLOBAL ──────────────────────────────────────
 
-def _run_test_cycle() -> dict:
+_test_estado = {
+    "status":     "idle",   # idle | running | done | error
+    "ciclos":     [],
+    "ciclo_actual": 0,
+    "started_at": None,
+    "finished_at": None,
+    "pnl_total_simulado": 0.0,
+    "resumen_final": "",
+    "error": None,
+}
+_test_thread = None
+
+TEST_POLL_SECS   = 10   # snapshot cada 10s dentro de cada ciclo
+NUM_CICLOS_TEST  = 3
+
+
+def _run_test_3ciclos():
     """
-    Ejecuta un ciclo completo de diagnostico SIN arriesgar dinero real:
-      1. Autenticacion CLOB
-      2. Saldo USDC real
-      3. Mercado activo
-      4. Order books (UP y DOWN)
-      5. Evaluacion de senal OBI
-      6. Orden de prueba minima → colocada → cancelada inmediatamente
-    Retorna JSON con el resultado de cada paso.
+    Corre en un thread separado. Observa NUM_CICLOS_TEST mercados consecutivos
+    SIN colocar ordenes reales. Simula toda la logica de entrada, hedge, early
+    exit y resolucion con el mismo codigo de decision que el bot live.
     """
-    res = {"ts": datetime.now().isoformat(), "pasos": {}, "ok": False, "veredicto": ""}
+    global _test_estado
+    _test_estado = {
+        "status": "running", "ciclos": [], "ciclo_actual": 0,
+        "started_at": datetime.now().isoformat(), "finished_at": None,
+        "pnl_total_simulado": 0.0, "resumen_final": "", "error": None,
+    }
 
-    # ── Paso 1: Auth CLOB ─────────────────────────────────────────────────────
     try:
-        orders = clob.get_orders()
-        res["pasos"]["1_clob_auth"] = {"ok": True, "ordenes_abiertas": len(orders or [])}
+        # ── Pre-chequeo: auth + saldo ────────────────────────────────────────
+        try:
+            orders = clob.get_orders()
+            _test_estado["clob_ok"] = True
+            _test_estado["ordenes_abiertas"] = len(orders or [])
+        except Exception as e:
+            _test_estado["status"] = "error"
+            _test_estado["error"]  = f"Auth CLOB fallo: {e}"
+            return
+
+        try:
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            ba  = clob.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+            bal = float(ba.get("balance", 0)) / 1_000_000
+            _test_estado["saldo_usdc"] = round(bal, 2)
+        except Exception:
+            _test_estado["saldo_usdc"] = None
+
+        # ── Orden de prueba real (place + cancel) ────────────────────────────
+        _test_estado["orden_prueba"] = {"status": "pendiente"}
+        try:
+            mkt_p = find_active_market(SYMBOL)
+            if mkt_p:
+                up_p, _ = get_order_book_metrics(mkt_p["up_token_id"])
+                if up_p and up_p["best_bid"] > 0:
+                    tp    = round(up_p["best_bid"] + 0.001, 4)
+                    tsize = 5.0
+                    oa    = OrderArgs(price=tp, size=tsize, side=BUY,
+                                     token_id=mkt_p["up_token_id"], fee_rate_bps=1000)
+                    so   = clob.create_order(oa)
+                    resp = clob.post_order(so, OrderType.GTC)
+                    if "orderID" in resp:
+                        time.sleep(0.5)
+                        clob.cancel(resp["orderID"])
+                        _test_estado["orden_prueba"] = {
+                            "status": "ok", "order_id": resp["orderID"],
+                            "precio": tp, "size": tsize,
+                            "accion": "COLOCADA y CANCELADA (sin costo real)",
+                        }
+                    else:
+                        _test_estado["orden_prueba"] = {"status": "error", "resp": str(resp)}
+        except Exception as e:
+            _test_estado["orden_prueba"] = {"status": "error", "error": str(e)}
+
+        # ── 3 ciclos de observacion ──────────────────────────────────────────
+        for ciclo_num in range(1, NUM_CICLOS_TEST + 1):
+            _test_estado["ciclo_actual"] = ciclo_num
+            ciclo = {
+                "num": ciclo_num, "status": "buscando_mercado",
+                "mercado": None, "snapshots": [],
+                "sim_entrada": None, "sim_hedge": None, "sim_exit": None,
+                "resolucion_detectada": None, "pnl_simulado": 0.0, "resumen": "",
+            }
+            _test_estado["ciclos"].append(ciclo)
+
+            # Buscar mercado — esperar hasta 5 min si estamos entre slots
+            log.info(f"[TEST] Ciclo {ciclo_num}/{NUM_CICLOS_TEST} — buscando mercado {SYMBOL}...")
+            mkt = None
+            for _ in range(30):
+                mkt = find_active_market(SYMBOL)
+                if mkt:
+                    break
+                time.sleep(10)
+
+            if not mkt:
+                ciclo["status"]  = "error"
+                ciclo["resumen"] = "No se encontro mercado activo tras 5 min de espera"
+                continue
+
+            secs_start = seconds_remaining(mkt) or 0
+            ciclo["mercado"] = {
+                "question":           mkt.get("question", ""),
+                "end_date":           mkt.get("end_date", ""),
+                "secs_al_descubrir":  round(secs_start, 1),
+                "up_token":           mkt["up_token_id"][:16] + "...",
+                "down_token":         mkt["down_token_id"][:16] + "...",
+            }
+            ciclo["status"] = "observando"
+            log.info(f"[TEST] Ciclo {ciclo_num} — {mkt.get('question','')} | {secs_start:.0f}s restantes")
+
+            # Estado simulado de posicion (no toca capital real)
+            obi_hist_up, obi_hist_dn = [], []
+            sim = {
+                "activa": False, "lado1": None, "l1_precio": 0.0,
+                "l1_shares": 0.0, "hedgeado": False,
+                "lado2": None, "l2_precio": 0.0, "l2_shares": 0.0,
+                "ts_entrada": None,
+            }
+            ya_opero = False
+
+            # Loop de observacion del ciclo
+            while True:
+                up_m, _ = get_order_book_metrics(mkt["up_token_id"])
+                dn_m, _ = get_order_book_metrics(mkt["down_token_id"])
+                secs    = seconds_remaining(mkt)
+
+                if not up_m or not dn_m:
+                    time.sleep(TEST_POLL_SECS)
+                    continue
+
+                obi_up = up_m["obi"]
+                obi_dn = dn_m["obi"]
+                obi_hist_up = (obi_hist_up + [obi_up])[-8:]
+                obi_hist_dn = (obi_hist_dn + [obi_dn])[-8:]
+
+                sig_up = compute_signal(obi_up, obi_hist_up, OBI_THRESHOLD)
+                sig_dn = compute_signal(obi_dn, obi_hist_dn, OBI_THRESHOLD)
+
+                in_ventana = ENTRY_WINDOW_MIN < (secs or 0) <= ENTRY_WINDOW_MAX
+                spread_ok  = up_m["spread"] <= SPREAD_MAX and dn_m["spread"] <= SPREAD_MAX
+                up_mid_v   = (up_m["best_bid"] + up_m["best_ask"]) / 2
+                dn_mid_v   = (dn_m["best_bid"] + dn_m["best_ask"]) / 2
+
+                # ── Evaluar entrada simulada ─────────────────────────────────
+                would_enter = None
+                if not ya_opero and in_ventana and spread_ok:
+                    if sig_up["combined"] >= OBI_STRONG_THRESHOLD and PRECIO_MIN_LADO1 <= up_m["best_ask"] <= PRECIO_MAX_LADO1:
+                        would_enter = "UP"
+                    elif sig_dn["combined"] >= OBI_STRONG_THRESHOLD and PRECIO_MIN_LADO1 <= dn_m["best_ask"] <= PRECIO_MAX_LADO1:
+                        would_enter = "DOWN"
+                    elif sig_up["label"] in ("UP", "STRONG UP") and sig_up["combined"] > sig_dn["combined"] and PRECIO_MIN_LADO1 <= up_m["best_ask"] <= PRECIO_MAX_LADO1:
+                        would_enter = "UP"
+                    elif sig_dn["label"] in ("UP", "STRONG UP") and sig_dn["combined"] > sig_up["combined"] and PRECIO_MIN_LADO1 <= dn_m["best_ask"] <= PRECIO_MAX_LADO1:
+                        would_enter = "DOWN"
+
+                if would_enter and not sim["activa"] and not ya_opero:
+                    ask = up_m["best_ask"] if would_enter == "UP" else dn_m["best_ask"]
+                    bid = up_m["best_bid"] if would_enter == "UP" else dn_m["best_bid"]
+                    sim.update({
+                        "activa": True, "lado1": would_enter,
+                        "l1_precio": ask,
+                        "l1_shares": round(USD_POR_LADO / ask, 4),
+                        "ts_entrada": time.time(),
+                    })
+                    ya_opero = True
+                    ciclo["sim_entrada"] = {
+                        "lado": would_enter, "ask": ask, "bid": bid,
+                        "shares": sim["l1_shares"], "usd": USD_POR_LADO,
+                        "obi": round(obi_up if would_enter == "UP" else obi_dn, 4),
+                        "sig_combined": sig_up["combined"] if would_enter == "UP" else sig_dn["combined"],
+                        "secs_restantes": round(secs or 0, 1),
+                    }
+
+                # ── Evaluar hedge simulado ───────────────────────────────────
+                if sim["activa"] and not sim["hedgeado"]:
+                    bid_l1  = up_m["best_bid"] if sim["lado1"] == "UP" else dn_m["best_bid"]
+                    subida  = bid_l1 - sim["l1_precio"]
+                    lado2   = "DOWN" if sim["lado1"] == "UP" else "UP"
+                    ask_l2  = dn_m["best_ask"] if lado2 == "DOWN" else up_m["best_ask"]
+                    obi_l2  = dn_m["obi"]      if lado2 == "DOWN" else up_m["obi"]
+
+                    if subida >= HEDGE_MOVE_MIN and obi_l2 >= HEDGE_OBI_MIN and HEDGE_PRECIO_MIN <= ask_l2 <= HEDGE_PRECIO_MAX:
+                        sim.update({
+                            "hedgeado": True, "lado2": lado2,
+                            "l2_precio": ask_l2,
+                            "l2_shares": round(USD_POR_LADO / ask_l2, 4),
+                        })
+                        ciclo["sim_hedge"] = {
+                            "lado": lado2, "ask": ask_l2,
+                            "shares": sim["l2_shares"], "usd": USD_POR_LADO,
+                            "subida_l1_cents": round(subida * 100, 2),
+                            "obi_l2": round(obi_l2, 4),
+                            "secs_restantes": round(secs or 0, 1),
+                        }
+
+                # ── Evaluar early exit simulado ──────────────────────────────
+                if sim["activa"] and not sim["hedgeado"] and not ciclo["sim_exit"]:
+                    bid_l1      = up_m["best_bid"] if sim["lado1"] == "UP" else dn_m["best_bid"]
+                    obi_l1      = up_m["obi"]      if sim["lado1"] == "UP" else dn_m["obi"]
+                    caida       = sim["l1_precio"] - bid_l1
+                    secs_en_pos = time.time() - sim["ts_entrada"] if sim["ts_entrada"] else 0
+                    razon_exit  = None
+                    if secs_en_pos > EARLY_EXIT_SECS:
+                        razon_exit = f"timeout {int(secs_en_pos)}s sin hedge"
+                    elif obi_l1 < EARLY_EXIT_OBI_FLIP:
+                        razon_exit = f"OBI invertido {obi_l1:+.3f}"
+                    elif caida > EARLY_EXIT_PRICE_DROP:
+                        razon_exit = f"caida {caida*100:.1f}c desde entrada"
+                    if razon_exit:
+                        pnl_exit = round(sim["l1_shares"] * bid_l1 - USD_POR_LADO, 4)
+                        ciclo["sim_exit"] = {
+                            "razon": razon_exit, "precio_exit": bid_l1,
+                            "pnl_sim": pnl_exit, "secs_restantes": round(secs or 0, 1),
+                        }
+                        sim["activa"] = False
+
+                # ── Detectar resolucion ──────────────────────────────────────
+                resuelto = None
+                if   up_mid_v >= RESOLVED_UP_THRESH: resuelto = "UP"
+                elif up_mid_v <= RESOLVED_DN_THRESH:  resuelto = "DOWN"
+                elif dn_mid_v >= RESOLVED_UP_THRESH:  resuelto = "DOWN"
+
+                # ── Snapshot ─────────────────────────────────────────────────
+                ciclo["snapshots"].append({
+                    "ts":          datetime.now().strftime("%H:%M:%S"),
+                    "secs":        round(secs or 0, 1),
+                    "UP":  {"bid": up_m["best_bid"], "ask": up_m["best_ask"],
+                            "obi": round(obi_up, 4), "spread": up_m["spread"],
+                            "bid_vol": up_m["bid_volume"], "ask_vol": up_m["ask_volume"]},
+                    "DN":  {"bid": dn_m["best_bid"], "ask": dn_m["best_ask"],
+                            "obi": round(obi_dn, 4), "spread": dn_m["spread"],
+                            "bid_vol": dn_m["bid_volume"], "ask_vol": dn_m["ask_volume"]},
+                    "sig_up": {"label": sig_up["label"], "combined": sig_up["combined"]},
+                    "sig_dn": {"label": sig_dn["label"], "combined": sig_dn["combined"]},
+                    "ventana_ok":   in_ventana,
+                    "spread_ok":    spread_ok,
+                    "would_enter":  would_enter,
+                    "sim_activa":   sim["activa"],
+                    "sim_hedgeado": sim["hedgeado"],
+                    "resolucion":   resuelto,
+                })
+
+                if resuelto:
+                    ciclo["resolucion_detectada"] = resuelto
+
+                # Salir del loop si el mercado expiro o se resolvio
+                if secs is not None and secs <= 0:
+                    break
+                if resuelto:
+                    time.sleep(TEST_POLL_SECS)
+                    break
+
+                time.sleep(TEST_POLL_SECS)
+
+            # ── Calcular PnL simulado del ciclo ──────────────────────────────
+            res_c = ciclo["resolucion_detectada"]
+            if ciclo["sim_exit"]:
+                ciclo["pnl_simulado"] = ciclo["sim_exit"]["pnl_sim"]
+                ciclo["resumen"] = f"Early exit ({ciclo['sim_exit']['razon']}) | PnL sim: ${ciclo['pnl_simulado']:+.2f}"
+
+            elif ciclo["sim_entrada"] and res_c:
+                lado1  = ciclo["sim_entrada"]["lado"]
+                sh1    = ciclo["sim_entrada"]["shares"]
+                pnl1   = round(sh1 * 1.0 - USD_POR_LADO, 4) if res_c == lado1 else -USD_POR_LADO
+                r1txt  = f"L1 {lado1} {'WIN' if res_c==lado1 else 'LOSS'} ${pnl1:+.2f}"
+                pnl_t  = pnl1
+
+                r2txt = ""
+                if ciclo["sim_hedge"]:
+                    lado2 = ciclo["sim_hedge"]["lado"]
+                    sh2   = ciclo["sim_hedge"]["shares"]
+                    pnl2  = round(sh2 * 1.0 - USD_POR_LADO, 4) if res_c == lado2 else -USD_POR_LADO
+                    r2txt = f" | L2 {lado2} {'WIN' if res_c==lado2 else 'LOSS'} ${pnl2:+.2f}"
+                    pnl_t += pnl2
+
+                ciclo["pnl_simulado"] = round(pnl_t, 4)
+                ciclo["resumen"] = f"Resolucion={res_c} | {r1txt}{r2txt} | PnL sim: ${pnl_t:+.2f}"
+
+            elif not ciclo["sim_entrada"]:
+                ciclo["resumen"] = "Sin entrada — condiciones no alcanzadas en este ciclo"
+            else:
+                ciclo["resumen"] = "Sin resolucion detectada"
+
+            ciclo["status"] = "completado"
+            log.info(f"[TEST] Ciclo {ciclo_num} completado: {ciclo['resumen']}")
+            time.sleep(3)   # pausa breve entre ciclos
+
+        # ── Resumen final ────────────────────────────────────────────────────
+        total_pnl = sum(c.get("pnl_simulado", 0.0) for c in _test_estado["ciclos"])
+        entradas  = sum(1 for c in _test_estado["ciclos"] if c.get("sim_entrada"))
+        _test_estado["status"]               = "done"
+        _test_estado["finished_at"]          = datetime.now().isoformat()
+        _test_estado["pnl_total_simulado"]   = round(total_pnl, 4)
+        _test_estado["resumen_final"]        = (
+            f"{NUM_CICLOS_TEST} ciclos completados | {entradas} entradas simuladas | "
+            f"PnL simulado total: ${total_pnl:+.2f} | Orden fija: ${USD_POR_LADO:.2f}/lado"
+        )
+        log.info(f"[TEST] Prueba 3 ciclos OK. {_test_estado['resumen_final']}")
+
     except Exception as e:
-        res["pasos"]["1_clob_auth"] = {"ok": False, "error": str(e)}
-        res["veredicto"] = f"FALLO en autenticacion CLOB: {e}"
-        return res
-
-    # ── Paso 2: Saldo USDC ───────────────────────────────────────────────────
-    try:
-        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
-        ba  = clob.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
-        bal = float(ba.get("balance", 0)) / 1_000_000
-        alw = float(ba.get("allowance", 0)) / 1_000_000
-        res["pasos"]["2_saldo"] = {"ok": True, "usdc": round(bal, 2), "allowance": round(alw, 2)}
-        if bal < MIN_USD_ORDEN * 2:
-            res["pasos"]["2_saldo"]["advertencia"] = "Saldo muy bajo para operar"
-    except Exception as e:
-        res["pasos"]["2_saldo"] = {"ok": False, "error": str(e)}
-
-    # ── Paso 3: Mercado activo ────────────────────────────────────────────────
-    try:
-        mkt = find_active_market(SYMBOL)
-        if not mkt:
-            res["pasos"]["3_mercado"] = {"ok": False, "error": "No hay mercado activo ahora"}
-            res["veredicto"] = "FALLO: sin mercado activo (puede que estes entre ciclos, reintenta en unos segundos)"
-            return res
-        secs = seconds_remaining(mkt)
-        res["pasos"]["3_mercado"] = {
-            "ok":                 True,
-            "question":           mkt.get("question", ""),
-            "end_date":           mkt.get("end_date", ""),
-            "segundos_restantes": round(secs, 1) if secs else None,
-            "up_token_id":        mkt["up_token_id"][:20] + "...",
-            "down_token_id":      mkt["down_token_id"][:20] + "...",
-        }
-    except Exception as e:
-        res["pasos"]["3_mercado"] = {"ok": False, "error": str(e)}
-        res["veredicto"] = f"FALLO buscando mercado: {e}"
-        return res
-
-    # ── Paso 4: Order books ───────────────────────────────────────────────────
-    try:
-        up_m, eu = get_order_book_metrics(mkt["up_token_id"])
-        dn_m, ed = get_order_book_metrics(mkt["down_token_id"])
-        if not up_m or not dn_m:
-            res["pasos"]["4_orderbooks"] = {"ok": False, "error": eu or ed}
-            res["veredicto"] = "FALLO: order books no disponibles"
-            return res
-        res["pasos"]["4_orderbooks"] = {
-            "ok": True,
-            "UP": {"bid": up_m["best_bid"], "ask": up_m["best_ask"],
-                   "obi": up_m["obi"], "spread": up_m["spread"],
-                   "bid_vol": up_m["bid_volume"], "ask_vol": up_m["ask_volume"]},
-            "DN": {"bid": dn_m["best_bid"], "ask": dn_m["best_ask"],
-                   "obi": dn_m["obi"], "spread": dn_m["spread"],
-                   "bid_vol": dn_m["bid_volume"], "ask_vol": dn_m["ask_volume"]},
-        }
-    except Exception as e:
-        res["pasos"]["4_orderbooks"] = {"ok": False, "error": str(e)}
-        res["veredicto"] = f"FALLO leyendo order books: {e}"
-        return res
-
-    # ── Paso 5: Evaluacion de senal ───────────────────────────────────────────
-    try:
-        sig_up = compute_signal(up_m["obi"], [up_m["obi"]], OBI_THRESHOLD)
-        sig_dn = compute_signal(dn_m["obi"], [dn_m["obi"]], OBI_THRESHOLD)
-
-        # Elegir el lado con mayor signal para la orden de prueba
-        if sig_up["combined"] >= sig_dn["combined"]:
-            test_lado, test_ask, test_token = "UP",   up_m["best_ask"], mkt["up_token_id"]
-        else:
-            test_lado, test_ask, test_token = "DOWN", dn_m["best_ask"], mkt["down_token_id"]
-
-        in_ventana    = ENTRY_WINDOW_MIN < (secs or 0) <= ENTRY_WINDOW_MAX
-        in_precio     = PRECIO_MIN_LADO1 <= test_ask <= PRECIO_MAX_LADO1
-        spread_ok     = up_m["spread"] <= SPREAD_MAX and dn_m["spread"] <= SPREAD_MAX
-
-        res["pasos"]["5_senal"] = {
-            "ok":          True,
-            "UP":          {"label": sig_up["label"], "combined": sig_up["combined"]},
-            "DN":          {"label": sig_dn["label"], "combined": sig_dn["combined"]},
-            "lado_test":   test_lado,
-            "ask_test":    test_ask,
-            "ventana_ok":  in_ventana,
-            "precio_ok":   in_precio,
-            "spread_ok":   spread_ok,
-            "entraria":    in_ventana and in_precio and spread_ok,
-        }
-    except Exception as e:
-        res["pasos"]["5_senal"] = {"ok": False, "error": str(e)}
-        res["veredicto"] = f"FALLO evaluando senal: {e}"
-        return res
-
-    # ── Paso 6: Orden minima real → cancelacion inmediata ─────────────────────
-    try:
-        # Precio maker: bid del lado elegido + 0.001 (no cruza el libro, fee=0)
-        ob_key    = "UP" if test_lado == "UP" else "DN"   # fix: claves son UP/DN
-        ob_test   = res["pasos"]["4_orderbooks"][ob_key]
-        test_bid  = ob_test["bid"]
-        test_price = round(test_bid + 0.001, 4)
-        # Minimo de Polymarket: 5 tokens (~$2-3 segun el precio)
-        test_usd  = round(5.0 * test_price, 2)
-        test_size = 5.0
-
-        order_args   = OrderArgs(price=test_price, size=test_size, side=BUY,
-                                 token_id=test_token, fee_rate_bps=1000)
-        signed_order = clob.create_order(order_args)
-        resp         = clob.post_order(signed_order, OrderType.GTC)
-
-        if "orderID" not in resp:
-            res["pasos"]["6_orden_prueba"] = {"ok": False, "error": f"API rechazo la orden: {resp}"}
-            res["veredicto"] = "FALLO: la API rechazo la orden de prueba"
-            return res
-
-        order_id = resp["orderID"]
-        time.sleep(0.5)
-        clob.cancel(order_id)
-
-        res["pasos"]["6_orden_prueba"] = {
-            "ok":         True,
-            "order_id":   order_id,
-            "lado":       test_lado,
-            "bid":        test_bid,
-            "precio":     test_price,
-            "size":       test_size,
-            "fee_rate":   "1000 bps",
-            "usd_prueba": test_usd,
-            "accion":     "COLOCADA y CANCELADA exitosamente (sin costo real)",
-        }
-    except Exception as e:
-        res["pasos"]["6_orden_prueba"] = {"ok": False, "error": str(e)}
-        res["veredicto"] = f"FALLO en orden de prueba: {e}"
-        return res
-
-    # ── Veredicto final ───────────────────────────────────────────────────────
-    res["ok"] = True
-    orden_size = round(estado["capital"] * MAX_PCT_POR_LADO, 2)
-    res["veredicto"] = (
-        f"TODO OK — Listo para operar. "
-        f"Ordenes reales de ${orden_size:.2f} USD por lado ({MAX_PCT_POR_LADO*100:.1f}% del capital)."
-    )
-    return res
+        _test_estado["status"] = "error"
+        _test_estado["error"]  = str(e)
+        import traceback as tb
+        _test_estado["traceback"] = tb.format_exc()
+        log.error(f"[TEST] Error fatal en prueba: {e}")
 
 
 # ─── REFRESCO DE SALDO REAL ───────────────────────────────────────────────────
@@ -1088,7 +1294,7 @@ if __name__ == "__main__":
                     self._serve_csv()
                 elif self.path == "/api/balance":
                     self._serve_balance()
-                elif self.path == "/api/test":
+                elif self.path == "/api/test" or self.path == "/api/test/status":
                     self._serve_test()
                 else:
                     self._send(404, "text/plain", b"Not found")
@@ -1188,9 +1394,17 @@ if __name__ == "__main__":
                 self._send(500, "application/json", json.dumps({"error": str(e)}).encode())
 
         def _serve_test(self):
+            global _test_thread
             try:
-                resultado = _run_test_cycle()
-                self._send(200, "application/json", json.dumps(resultado, indent=2).encode())
+                # Si ya hay una prueba corriendo, devolver estado actual (sin lanzar otra)
+                if _test_estado["status"] == "running":
+                    self._send(200, "application/json", json.dumps(_test_estado, indent=2).encode())
+                    return
+                # Lanzar nueva prueba en background
+                _test_thread = threading.Thread(target=_run_test_3ciclos, daemon=True)
+                _test_thread.start()
+                # Devolver estado inicial inmediatamente
+                self._send(200, "application/json", json.dumps(_test_estado, indent=2).encode())
             except Exception as e:
                 self._send(500, "application/json", json.dumps({"ok": False, "error": str(e)}).encode())
 
