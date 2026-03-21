@@ -84,8 +84,13 @@ EARLY_EXIT_SECS       = 60     # sale si lleva 60s sin hedge
 EARLY_EXIT_OBI_FLIP   = -0.15
 EARLY_EXIT_PRICE_DROP = 0.08
 
-RESOLVED_UP_THRESH = 0.90
-RESOLVED_DN_THRESH = 0.10
+RESOLVED_UP_THRESH = 0.97   # identico a sim v8
+RESOLVED_DN_THRESH = 0.03   # identico a sim v8
+
+# Umbral a partir del cual el CLOB de Polymarket rechaza ventas (near-resolution).
+# Por encima de este bid, es mejor esperar el pago automatico a $1.00.
+# Adaptacion live — no existe en la sim.
+NEAR_RESOLUTION_THRESH = 0.80
 
 MIN_USD_ORDEN = 1.00
 
@@ -664,10 +669,9 @@ async def intentar_early_exit(up_m, dn_m, loop):
     secs_en_pos = time.time() - pos["ts_entrada"] if pos["ts_entrada"] else 0
     caida       = pos["lado1_precio"] - bid_lado1
 
-    # Si el token esta ganando fuertemente (bid > umbral de resolucion), no intentar vender:
-    # el CLOB puede rechazar ventas de tokens cerca de $1, y ademas es mas rentable
-    # esperar la resolucion automatica a $1.00 que vender antes.
-    if bid_lado1 >= RESOLVED_UP_THRESH:
+    # Adaptacion live: el CLOB rechaza ventas cuando el token se acerca a $1.
+    # Si bid >= NEAR_RESOLUTION_THRESH, no intentar vender — esperar resolucion a $1.
+    if bid_lado1 >= NEAR_RESOLUTION_THRESH:
         return
 
     razon = None
