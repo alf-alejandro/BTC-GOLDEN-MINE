@@ -403,6 +403,18 @@ async def comprar_live(lado: str, token_id: str, ask: float, bid: float, loop) -
     except Exception as e:
         log_ev(f"  Advertencia al cancelar: {e}")
 
+    # Verificar fill parcial antes del cancel
+    try:
+        order_info = await loop.run_in_executor(None, clob.get_order, order_id)
+        if order_info:
+            size_matched = float(order_info.get("size_matched", 0) or 0)
+            if size_matched > 0:
+                costo_parcial = round(size_matched * maker_price, 4)
+                log_ev(f"  ALERTA: fill parcial detectado — {size_matched} tokens @ {maker_price:.4f} (${costo_parcial:.2f}) — vendiendo inmediatamente")
+                await vender_taker(lado, token_id, bid, size_matched, loop)
+    except Exception as e:
+        log_ev(f"  Advertencia verificando fill parcial: {e}")
+
     return 0.0, 0.0, 0.0
 
 
