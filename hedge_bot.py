@@ -790,20 +790,27 @@ async def main_loop():
     ya_opero_ciclo    = False
     _ob_errores       = 0     # contador de errores OB consecutivos para backoff
     _bot_prev_activo  = False # detectar transicion pausa→activo
+    _skip_primer_ciclo = False # True tras activacion: saltarse el primer ciclo que se encuentre
 
     while True:
         try:
             # 0. Si el bot esta pausado, solo guardar estado y esperar
             if not bot_activo:
-                _bot_prev_activo = False
+                _bot_prev_activo   = False
+                _skip_primer_ciclo = False
                 guardar_estado()
                 await asyncio.sleep(2)
                 continue
 
-            # 0c. Si el bot acaba de activarse y hay un ciclo en curso, saltarlo
-            if not _bot_prev_activo and mkt_global is not None:
-                ya_opero_ciclo = True
-                log_ev("Bot activado — saltando ciclo actual, esperando el proximo para entrar")
+            # 0c. Detectar transicion pausa→activo: marcar para saltar el primer ciclo
+            if not _bot_prev_activo:
+                _skip_primer_ciclo = True
+                if mkt_global is not None:
+                    # Ya hay mercado en curso — marcarlo como saltado inmediatamente
+                    ya_opero_ciclo = True
+                    log_ev("Bot activado — saltando ciclo en curso, esperando el proximo")
+                else:
+                    log_ev("Bot activado — saltando primer ciclo que se encuentre")
             _bot_prev_activo = True
 
             # 0b. Refrescar saldo real cada 10 minutos
@@ -822,7 +829,13 @@ async def main_loop():
                     mkt_global = mkt
                     estado["ciclos"] += 1
                     mkt_end_date = mkt.get("end_date")
-                    log_ev(f"Mercado: {mkt.get('question','')}")
+                    # Si el bot acaba de activarse, saltar este primer ciclo
+                    if _skip_primer_ciclo:
+                        ya_opero_ciclo     = True
+                        _skip_primer_ciclo = False
+                        log_ev(f"Mercado encontrado (saltado): {mkt.get('question','')} — siguiente ciclo sera el primero")
+                    else:
+                        log_ev(f"Mercado: {mkt.get('question','')}")
                     guardar_estado()
                 else:
                     log_ev("Sin mercado activo — reintentando en 10s...")
