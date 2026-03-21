@@ -703,6 +703,15 @@ async def forzar_salida(up_m, dn_m, loop):
     if intentos == 15:
         log_ev(f"  ALERTA: {intentos} reintentos fallidos — posible problema de allowance on-chain")
 
+    # Renovar approvals on-chain cada 5 intentos a partir del 5
+    if intentos >= 5 and intentos % 5 == 0:
+        try:
+            log_ev(f"  Renovando approvals on-chain (intento #{intentos})...")
+            await loop.run_in_executor(None, clob.update_profile)
+            log_ev(f"  Approvals renovados OK")
+        except Exception as e:
+            log_ev(f"  Advertencia renovando approvals: {e}")
+
     # Backoff a partir del intento 10: esperar mas entre intentos para no saturar la API
     if intentos >= 10:
         await asyncio.sleep(3.0)
