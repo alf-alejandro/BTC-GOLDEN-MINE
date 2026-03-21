@@ -84,8 +84,8 @@ EARLY_EXIT_SECS       = 60     # sale si lleva 60s sin hedge
 EARLY_EXIT_OBI_FLIP   = -0.15
 EARLY_EXIT_PRICE_DROP = 0.08
 
-RESOLVED_UP_THRESH = 0.97
-RESOLVED_DN_THRESH = 0.03
+RESOLVED_UP_THRESH = 0.90
+RESOLVED_DN_THRESH = 0.10
 
 MIN_USD_ORDEN = 1.00
 
@@ -663,6 +663,12 @@ async def intentar_early_exit(up_m, dn_m, loop):
     token_id    = pos["lado1_token_id"]   # token guardado al comprar, no depende de mkt_global
     secs_en_pos = time.time() - pos["ts_entrada"] if pos["ts_entrada"] else 0
     caida       = pos["lado1_precio"] - bid_lado1
+
+    # Si el token esta ganando fuertemente (bid > umbral de resolucion), no intentar vender:
+    # el CLOB puede rechazar ventas de tokens cerca de $1, y ademas es mas rentable
+    # esperar la resolucion automatica a $1.00 que vender antes.
+    if bid_lado1 >= RESOLVED_UP_THRESH:
+        return
 
     razon = None
     if secs_en_pos > EARLY_EXIT_SECS:
