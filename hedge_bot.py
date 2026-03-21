@@ -84,10 +84,10 @@ EARLY_EXIT_SECS       = 60     # sale si lleva 60s sin hedge
 EARLY_EXIT_OBI_FLIP   = -0.15
 EARLY_EXIT_PRICE_DROP = 0.08
 
-# Minimo de segundos en posicion antes de intentar cualquier venta.
-# El CLOB necesita ~15s para acreditar el balance post-fill en su cache.
+# Floor minimo antes de intentar cualquier venta (evita spam en los primeros segundos).
+# El check real es get_balance_allowance(CONDITIONAL) — solo vende cuando el CLOB confirma balance.
 # Adaptacion live — no existe en la sim.
-MIN_HOLD_SECS = 15
+MIN_HOLD_SECS = 10
 
 # Intervalo minimo entre reintentos de venta (segundos).
 SELL_RETRY_INTERVAL = 5.0
@@ -678,10 +678,19 @@ async def intentar_early_exit(up_m, dn_m, loop):
     secs_en_pos = time.time() - pos["ts_entrada"] if pos["ts_entrada"] else 0
     caida       = pos["lado1_precio"] - bid_lado1
 
-    # Adaptacion live: esperar MIN_HOLD_SECS antes de cualquier venta.
-    # El CLOB necesita ~30s para acreditar el balance post-fill en su cache.
+    # Adaptacion live: floor minimo antes de siquiera consultar el balance.
     if secs_en_pos < MIN_HOLD_SECS:
         return
+
+    # Verificar que el CLOB ya tiene el balance acreditado antes de intentar vender.
+    try:
+        ba_params = BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
+        ba = await loop.run_in_executor(None, lambda: clob.get_balance_allowance(ba_params))
+        clob_balance = float(ba.get("balance", 0))
+        if clob_balance < pos["lado1_shares"] * 0.90:
+            return  # silencioso — todavia sincronizando, recheck en siguiente tick
+    except Exception:
+        pass  # si falla la consulta, intentar de todas formas
 
     # Adaptacion live: el CLOB rechaza ventas de tokens cerca de $1 al final del ciclo.
     # Solo bloquear si AMBAS condiciones: precio alto Y poco tiempo restante (<= 90s).
@@ -759,6 +768,21 @@ async def forzar_salida(up_m, dn_m, loop):
     intentos = pos["exit_intentos"]
     bid_raw  = up_m["best_bid"] if lado1 == "UP" else dn_m["best_bid"]
     token_id = pos["lado1_token_id"]   # token guardado al comprar, no depende de mkt_global
+
+    # Verificar balance real en el CLOB antes de intentar vender.
+    # get_balance_allowance es read-only — no resetea el cache (a diferencia de update_balance_allowance).
+    # Si el CLOB todavia no ve los tokens, la venta fallaria de todas formas.
+    try:
+        ba_params = BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
+        ba = await loop.run_in_executor(None, lambda: clob.get_balance_allowance(ba_params))
+        clob_balance = float(ba.get("balance", 0))
+        if clob_balance < pos["lado1_shares"] * 0.90:
+            secs_en_pos = ahora - pos["ts_entrada"] if pos["ts_entrada"] else 0
+            log_ev(f"  Balance CLOB aun no listo: {clob_balance:.4f} tokens (esperado ~{pos['lado1_shares']:.4f}) — {secs_en_pos:.0f}s en posicion")
+            pos["exit_ts_intento"] = ahora
+            return
+    except Exception:
+        pass  # si falla la consulta, intentar de todas formas
 
     if intentos <= 3:
         precio_exit = max(round(bid_raw, 4), 0.01)
