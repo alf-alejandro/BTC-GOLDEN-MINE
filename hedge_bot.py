@@ -90,7 +90,7 @@ RESOLVED_DN_THRESH = 0.03   # identico a sim v8
 # Umbral a partir del cual el CLOB de Polymarket rechaza ventas (near-resolution).
 # Por encima de este bid, es mejor esperar el pago automatico a $1.00.
 # Adaptacion live — no existe en la sim.
-NEAR_RESOLUTION_THRESH = 0.80
+NEAR_RESOLUTION_THRESH = 0.82
 
 MIN_USD_ORDEN = 1.00
 
