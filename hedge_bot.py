@@ -68,7 +68,14 @@ OBI_THRESHOLD        = 0.10
 OBI_WINDOW_SIZE      = 8
 OBI_STRONG_THRESHOLD = 0.20
 
-SPREAD_MAX        = 0.12
+def spread_max_para_precio(precio: float) -> float:
+    """Spread máximo dinámico: más estricto en zonas de bajo precio / baja liquidez."""
+    if precio < 0.40:
+        return 0.02
+    elif precio < 0.55:
+        return 0.04
+    else:
+        return 0.06
 PRECIO_MIN_LADO1  = 0.30    # v8: zona <0.30 es consistentemente perdedora
 PRECIO_MAX_LADO1  = 0.75
 
@@ -464,7 +471,8 @@ def evaluar_senal(up_m, dn_m):
     signal_up = compute_signal(obi_up, list(obi_history_up), OBI_THRESHOLD)
     signal_dn = compute_signal(obi_dn, list(obi_history_dn), OBI_THRESHOLD)
 
-    if up_m["spread"] > SPREAD_MAX or dn_m["spread"] > SPREAD_MAX:
+    spread_limite = spread_max_para_precio(min(up_m["best_ask"], dn_m["best_ask"]))
+    if up_m["spread"] > spread_limite or dn_m["spread"] > spread_limite:
         return signal_up, signal_dn, None
 
     # Verificar precio maker real (bid+0.001), no el ask
@@ -1059,7 +1067,8 @@ def _run_test_3ciclos():
                 sig_dn = compute_signal(obi_dn, obi_hist_dn, OBI_THRESHOLD)
 
                 in_ventana = ENTRY_WINDOW_MIN < (secs or 0) <= ENTRY_WINDOW_MAX
-                spread_ok  = up_m["spread"] <= SPREAD_MAX and dn_m["spread"] <= SPREAD_MAX
+                _slimit    = spread_max_para_precio(min(up_m["best_ask"], dn_m["best_ask"]))
+                spread_ok  = up_m["spread"] <= _slimit and dn_m["spread"] <= _slimit
                 up_mid_v   = (up_m["best_bid"] + up_m["best_ask"]) / 2
                 dn_mid_v   = (dn_m["best_bid"] + dn_m["best_ask"]) / 2
 
