@@ -394,9 +394,17 @@ async def comprar_live(lado: str, token_id: str, ask: float, bid: float, loop) -
                     # Fill demasiado rapido = alguien vendio agresivamente contra nosotros
                     log_ev(f"  ALERTA: fill en {fill_secs:.1f}s — mercado en caida, saliendo sin registrar posicion")
                     estado["capital"] -= costo_real
-                    await vender_taker(lado, token_id, bid, shares, loop)
-                    estado["capital"] += shares * bid
-                    return 0.0, 0.0, 0.0
+                    exit_precio = await vender_taker(lado, token_id, bid, shares, loop)
+                    if exit_precio > 0.0:
+                        estado["capital"] += shares * exit_precio
+                        return 0.0, 0.0, 0.0
+                    else:
+                        # Venta fallida — restaurar capital y registrar posicion normal
+                        estado["capital"] += costo_real
+                        log_ev(f"  Fast-exit falló — registrando posicion para manejo normal")
+                        log_ev(f"  FILL BUY {lado} @ {maker_price:.4f} | {shares} tokens | ${costo_real:.2f}")
+                        estado["capital"] -= costo_real
+                        return maker_price, shares, costo_real
                 log_ev(f"  FILL BUY {lado} @ {maker_price:.4f} | {shares} tokens | ${costo_real:.2f}")
                 estado["capital"] -= costo_real
                 return maker_price, shares, costo_real
