@@ -105,7 +105,12 @@ def init_clob():
         signature_type=1,
     )
     clob.set_api_creds(clob.create_or_derive_api_creds())
-    log.info("Cliente CLOB autorizado.")
+    try:
+        clob.update_profile()
+        log.info("Cliente CLOB autorizado (approvals on-chain OK).")
+    except Exception as e:
+        log.warning(f"update_profile no disponible o ya activo: {e}")
+        log.info("Cliente CLOB autorizado.")
 
 # ─── ESTADO GLOBAL ────────────────────────────────────────────────────────────
 estado = {
