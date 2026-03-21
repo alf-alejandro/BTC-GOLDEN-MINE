@@ -137,6 +137,7 @@ pos = {
     "en_salida":        False,   # True cuando hay early exit pendiente de confirmar
     "exit_razon":       None,    # razon del early exit (para el log)
     "exit_intentos":    0,       # cuantos reintentos de venta llevamos
+    "lado1_token_id":   None,    # guardado al comprar — usado en todas las ventas
     "capital_usado":    0.0,
     "ts_entrada":       None,
     "secs_entrada":     0.0,
@@ -510,14 +511,15 @@ async def intentar_entrada(up_m, dn_m, secs, loop) -> bool:
     if usd == 0.0:
         return False
 
-    pos["activa"]        = True
-    pos["lado1_side"]    = lado
-    pos["lado1_precio"]  = precio
-    pos["lado1_shares"]  = shares
-    pos["lado1_usd"]     = usd
-    pos["capital_usado"] = usd
-    pos["ts_entrada"]    = time.time()
-    pos["secs_entrada"]  = secs or 0
+    pos["activa"]          = True
+    pos["lado1_side"]      = lado
+    pos["lado1_token_id"]  = token_id
+    pos["lado1_precio"]    = precio
+    pos["lado1_shares"]    = shares
+    pos["lado1_usd"]       = usd
+    pos["capital_usado"]   = usd
+    pos["ts_entrada"]      = time.time()
+    pos["secs_entrada"]    = secs or 0
 
     log_ev(f"ENTRADA LADO1 {lado} @ {precio:.4f} | {shares:.4f}sh | ${usd:.2f} | cap=${estado['capital']:.2f}")
     guardar_estado(up_m, dn_m)
@@ -576,7 +578,7 @@ async def intentar_early_exit(up_m, dn_m, loop):
     lado1       = pos["lado1_side"]
     bid_lado1   = up_m["best_bid"] if lado1 == "UP" else dn_m["best_bid"]
     obi_lado1   = up_m["obi"]      if lado1 == "UP" else dn_m["obi"]
-    token_id    = mkt_global["up_token_id"] if lado1 == "UP" else mkt_global["down_token_id"]
+    token_id    = pos["lado1_token_id"]   # token guardado al comprar, no depende de mkt_global
     secs_en_pos = time.time() - pos["ts_entrada"] if pos["ts_entrada"] else 0
     caida       = pos["lado1_precio"] - bid_lado1
 
@@ -643,7 +645,7 @@ async def forzar_salida(up_m, dn_m, loop):
     lado1    = pos["lado1_side"]
     intentos = pos["exit_intentos"]
     bid_raw  = up_m["best_bid"] if lado1 == "UP" else dn_m["best_bid"]
-    token_id = mkt_global["up_token_id"] if lado1 == "UP" else mkt_global["down_token_id"]
+    token_id = pos["lado1_token_id"]   # token guardado al comprar, no depende de mkt_global
 
     if intentos <= 3:
         precio_exit = max(round(bid_raw, 4), 0.01)
@@ -770,6 +772,7 @@ async def main_loop():
     signal_up_cache = None
     signal_dn_cache = None
     ya_opero_ciclo  = False
+    _ob_errores     = 0   # contador de errores OB consecutivos para backoff
 
     while True:
         try:
@@ -812,9 +815,14 @@ async def main_loop():
             )
 
             if not up_m or not dn_m:
-                log_ev(f"Error OB: {err_up or err_dn}")
-                await asyncio.sleep(POLL_INTERVAL * 2)
+                _ob_errores += 1
+                # Backoff exponencial: 2s, 4s, 8s, 16s, max 30s
+                espera = min(2 ** _ob_errores, 30)
+                log_ev(f"Error OB ({_ob_errores}): {err_up or err_dn} — reintentando en {espera}s")
+                await asyncio.sleep(espera)
                 continue
+
+            _ob_errores = 0  # reset al recuperarse
 
             secs = seconds_remaining(mkt_global)
 
