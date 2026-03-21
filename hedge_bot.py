@@ -63,8 +63,6 @@ USD_POR_LADO         = 3.75    # monto fijo por lado (lado1 + lado2 = $7.50 por 
 POLL_INTERVAL        = 1.0
 ORDER_FILL_TIMEOUT   = 4.0     # segundos maximos esperando fill de entrada
 ORDER_POLL_INTERVAL  = 2.0     # frecuencia de polling de estado de orden
-MIN_FILL_SECS        = 1.0     # fill en menos de esto = mercado cayendo, salir inmediato
-RETRY_BID_DROP_MAX   = 0.03   # si el bid cae mas de 3¢ entre reintentos, abortar
 
 OBI_THRESHOLD        = 0.10
 OBI_WINDOW_SIZE      = 8
@@ -155,8 +153,6 @@ mkt_end_date = None
 mkt_global   = None   # mercado activo (necesario para token_ids en ordenes)
 bot_activo   = False  # arranca PAUSADO — el usuario activa desde el dashboard
 
-_primer_bid_ciclo = None  # bid del primer intento de entrada en el ciclo actual
-_primer_bid_lado  = None  # lado del primer intento
 
 BALANCE_UPDATE_INTERVAL = 600   # refrescar saldo real cada 10 minutos
 _ts_ultimo_balance      = 0.0   # timestamp del ultimo fetch de saldo
@@ -386,29 +382,12 @@ async def comprar_live(lado: str, token_id: str, ask: float, bid: float, loop) -
         return 0.0, 0.0, 0.0
 
     # Esperar fill (el fill llega cuando un vendedor acepta nuestro precio)
-    ts_orden = time.time()
-    deadline = ts_orden + ORDER_FILL_TIMEOUT
+    deadline = time.time() + ORDER_FILL_TIMEOUT
     while time.time() < deadline:
         try:
             order_info = await loop.run_in_executor(None, clob.get_order, order_id)
             status = order_info.get("status", "") if order_info else ""
             if status in ("FILLED", "MATCHED"):
-                fill_secs = time.time() - ts_orden
-                if fill_secs < MIN_FILL_SECS:
-                    # Fill demasiado rapido = alguien vendio agresivamente contra nosotros
-                    log_ev(f"  ALERTA: fill en {fill_secs:.1f}s — mercado en caida, saliendo sin registrar posicion")
-                    estado["capital"] -= costo_real
-                    exit_precio = await vender_taker(lado, token_id, bid, shares, loop)
-                    if exit_precio > 0.0:
-                        estado["capital"] += shares * exit_precio
-                        return 0.0, 0.0, 0.0
-                    else:
-                        # Venta fallida — restaurar capital y registrar posicion normal
-                        estado["capital"] += costo_real
-                        log_ev(f"  Fast-exit falló — registrando posicion para manejo normal")
-                        log_ev(f"  FILL BUY {lado} @ {maker_price:.4f} | {shares} tokens | ${costo_real:.2f}")
-                        estado["capital"] -= costo_real
-                        return maker_price, shares, costo_real
                 log_ev(f"  FILL BUY {lado} @ {maker_price:.4f} | {shares} tokens | ${costo_real:.2f}")
                 estado["capital"] -= costo_real
                 return maker_price, shares, costo_real
@@ -516,8 +495,6 @@ def evaluar_senal(up_m, dn_m):
 # ─── ENTRADA LADO 1 ───────────────────────────────────────────────────────────
 
 async def intentar_entrada(up_m, dn_m, secs, loop) -> bool:
-    global _primer_bid_ciclo, _primer_bid_lado
-
     if not bot_activo:
         return False
     if pos["activa"]:
@@ -531,16 +508,6 @@ async def intentar_entrada(up_m, dn_m, secs, loop) -> bool:
 
     ask      = up_m["best_ask"] if lado == "UP" else dn_m["best_ask"]
     bid      = up_m["best_bid"] if lado == "UP" else dn_m["best_bid"]
-
-    # Detectar precio cayendo entre reintentos — abortar si bid cae mas de RETRY_BID_DROP_MAX
-    if _primer_bid_ciclo is None or _primer_bid_lado != lado:
-        _primer_bid_ciclo = bid
-        _primer_bid_lado  = lado
-    elif bid < _primer_bid_ciclo - RETRY_BID_DROP_MAX:
-        log_ev(f"  Abortando reintento — bid cayó {(_primer_bid_ciclo - bid)*100:.1f}¢ (primer intento @ {_primer_bid_ciclo:.4f})")
-        _primer_bid_ciclo = None
-        _primer_bid_lado  = None
-        return False
     obi      = up_m["obi"]      if lado == "UP" else dn_m["obi"]
     token_id = mkt_global["up_token_id"] if lado == "UP" else mkt_global["down_token_id"]
 
@@ -561,8 +528,6 @@ async def intentar_entrada(up_m, dn_m, secs, loop) -> bool:
     pos["ts_entrada"]      = time.time()
     pos["secs_entrada"]    = secs or 0
 
-    _primer_bid_ciclo = None
-    _primer_bid_lado  = None
     log_ev(f"ENTRADA LADO1 {lado} @ {precio:.4f} | {shares:.4f}sh | ${usd:.2f} | cap=${estado['capital']:.2f}")
     guardar_estado(up_m, dn_m)
     return True
@@ -870,8 +835,6 @@ async def main_loop():
                 obi_history_up.clear()
                 obi_history_dn.clear()
                 ya_opero_ciclo    = False
-                _primer_bid_ciclo = None
-                _primer_bid_lado  = None
                 mkt = await loop.run_in_executor(None, find_active_market, SYMBOL)
                 if mkt:
                     mkt_global = mkt
