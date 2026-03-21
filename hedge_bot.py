@@ -428,13 +428,21 @@ async def comprar_live(lado: str, token_id: str, ask: float, bid: float, loop) -
 async def vender_taker(lado: str, token_id: str, bid: float, shares: float, loop) -> float:
     """
     Coloca una orden GTC SELL al bid (Taker Exit — cruza con compradores existentes).
+    Vende el 99% de los shares para evitar el cache stale del CLOB (issue conocido de
+    Polymarket: instant-fill buys dejan el cache por debajo del balance real, y vender
+    el 100% excede el techo del cache aunque la chain tenga los tokens completos).
+    El 1% restante se cobra cuando el mercado resuelve a $1.
     Retorna el precio de ejecucion o 0.0 si falla.
     """
+    # Vender 99% — workaround para el cache stale del CLOB post-taker-buy
+    shares_sell = round(shares * 0.99, 2)
+    if shares_sell < 1.0:
+        shares_sell = shares  # si es muy pequeno, intentar todo igual
     exit_precio = max(round(bid, 4), 0.01)
-    log_ev(f"  Colocando SELL taker {lado} @ {exit_precio:.4f} | {shares} tokens")
+    log_ev(f"  Colocando SELL taker {lado} @ {exit_precio:.4f} | {shares_sell} tokens (99% de {shares})")
 
     try:
-        order_args   = OrderArgs(price=exit_precio, size=shares, side=SELL,
+        order_args   = OrderArgs(price=exit_precio, size=shares_sell, side=SELL,
                                  token_id=token_id, fee_rate_bps=1000)
         signed_order = await loop.run_in_executor(None, clob.create_order, order_args)
         resp         = await loop.run_in_executor(None, lambda: clob.post_order(signed_order, OrderType.GTC))
