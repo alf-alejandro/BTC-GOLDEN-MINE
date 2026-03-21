@@ -355,8 +355,8 @@ async def comprar_live(lado: str, token_id: str, ask: float, bid: float, loop) -
         log_ev(f"  x Capital insuficiente: ${estado['capital']:.2f}")
         return 0.0, 0.0, 0.0
 
-    # Precio maker: bid + 0.01 (mas agresivo, mayor probabilidad de fill)
-    maker_price = round(bid + 0.01, 4)
+    # Precio maker: bid + 0.002
+    maker_price = round(bid + 0.002, 4)
     shares      = round(usd / maker_price, 2)
     if shares < 5.0:
         shares = 5.0
