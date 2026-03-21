@@ -398,10 +398,14 @@ async def comprar_live(lado: str, token_id: str, ask: float, bid: float, loop) -
                 actual_cost = round(actual_shares * precio, 4)
                 log_ev(f"  FILL BUY {lado} @ {precio:.4f} | {actual_shares:.4f}sh | ${actual_cost:.2f}")
                 estado["capital"] -= actual_cost
-                # Notificar al CLOB del nuevo balance de tokens condicionales
+                # Esperar settlement on-chain (Polygon ~2-5s) ANTES de actualizar balance.
+                # Si se llama update_balance_allowance demasiado rapido, la chain aun no tiene
+                # los tokens y el CLOB graba balance=0, bloqueando todos los sells posteriores.
+                await asyncio.sleep(6.0)
                 try:
                     await loop.run_in_executor(None, lambda: clob.update_balance_allowance(
                         BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)))
+                    log_ev(f"  Balance CONDITIONAL actualizado OK")
                 except Exception:
                     pass
                 return precio, actual_shares, actual_cost
@@ -595,10 +599,12 @@ async def comprar_taker(lado: str, token_id: str, ask: float, loop) -> tuple[flo
                     actual_cost = round(actual_shares * precio, 4)
                     log_ev(f"  FILL BUY hedge {lado} @ {precio:.4f} | {actual_shares:.4f}sh | ${actual_cost:.2f}")
                     estado["capital"] -= actual_cost
-                    # Notificar al CLOB del nuevo balance de tokens condicionales
+                    # Esperar settlement on-chain antes de actualizar balance
+                    await asyncio.sleep(6.0)
                     try:
                         await loop.run_in_executor(None, lambda: clob.update_balance_allowance(
                             BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)))
+                        log_ev(f"  Balance CONDITIONAL hedge actualizado OK")
                     except Exception:
                         pass
                     return precio, actual_shares, actual_cost
