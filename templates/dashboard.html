@@ -793,86 +793,171 @@ function closeBalance(event) {
 
 // ── TEST ──────────────────────────────────────────────────────────────────────
 let _lastTestJson = null;
+let _testPollTimer = null;
 
 async function runTest() {
   document.getElementById('test-overlay').classList.add('open');
   document.getElementById('btn-copy-json').style.display = 'none';
-  document.getElementById('test-content').innerHTML =
-    '<div class="modal-spinner">Ejecutando ciclo de prueba completo...<br><small style="color:var(--muted)">Esto puede tardar hasta 30 segundos</small></div>';
-
   document.getElementById('btn-test').disabled = true;
   _lastTestJson = null;
+  if (_testPollTimer) clearInterval(_testPollTimer);
+
+  document.getElementById('test-content').innerHTML =
+    '<div class="modal-spinner">Iniciando prueba de 3 ciclos...<br><small style="color:var(--muted)">Cada ciclo dura ~5 minutos. Puedes cerrar y reabrir para ver el progreso.</small></div>';
 
   try {
     const r = await fetch('/api/test');
     const d = await r.json();
     _lastTestJson = d;
     renderTest(d);
+    // Si sigue corriendo, pollear cada 15s
+    if (d.status === 'running') {
+      _testPollTimer = setInterval(pollTest, 15000);
+    }
   } catch(e) {
     document.getElementById('test-content').innerHTML =
-      `<div class="modal-spinner" style="color:var(--red)">Error de conexion: ${e.message}</div>`;
+      `<div class="modal-spinner" style="color:var(--red)">Error: ${e.message}</div>`;
   } finally {
     document.getElementById('btn-test').disabled = false;
   }
 }
 
+async function pollTest() {
+  try {
+    const r = await fetch('/api/test/status');
+    const d = await r.json();
+    _lastTestJson = d;
+    renderTest(d);
+    if (d.status !== 'running') {
+      clearInterval(_testPollTimer);
+      _testPollTimer = null;
+    }
+  } catch(e) { /* silencioso */ }
+}
+
 function renderTest(d) {
-  const ok = d.ok;
-  const pasos = d.pasos || {};
-  const iconOk  = '<span style="color:var(--green)">&#10003;</span>';
+  const iconOk   = '<span style="color:var(--green)">&#10003;</span>';
   const iconFail = '<span style="color:var(--red)">&#10007;</span>';
-
-  const labels = {
-    '1_clob_auth':    'Auth CLOB',
-    '2_saldo':        'Saldo USDC',
-    '3_mercado':      'Mercado activo',
-    '4_orderbooks':   'Order Books',
-    '5_senal':        'Senal OBI',
-    '6_orden_prueba': 'Orden prueba',
-  };
-
+  const iconWait = '<span style="color:var(--orange)">&#8987;</span>';
   let html = '';
 
-  // Veredicto
-  html += `<div style="padding:12px 0 16px;font-size:13px;font-weight:700;
-    color:${ok ? 'var(--green)' : 'var(--red)'}">
-    ${ok ? '&#10003;' : '&#10007;'} ${d.veredicto}
+  // ── Cabecera de estado ───────────────────────────────────────────────────
+  const statusColor = d.status === 'done' ? 'var(--green)' : d.status === 'error' ? 'var(--red)' : 'var(--orange)';
+  const statusLabel = { running: 'EN CURSO', done: 'COMPLETADO', error: 'ERROR', idle: 'LISTO' }[d.status] || d.status;
+  html += `<div style="padding:10px 0 14px;font-size:12px;font-weight:700;color:${statusColor}">
+    ${d.status === 'running' ? iconWait : d.status === 'done' ? iconOk : iconFail} ${statusLabel}
+    ${d.status === 'running' ? ` — Ciclo ${d.ciclo_actual}/3` : ''}
   </div>`;
 
-  // Tabla de pasos
-  html += '<div style="border:1px solid var(--border);border-radius:4px;overflow:hidden">';
-  for (const [key, val] of Object.entries(pasos)) {
-    const label  = labels[key] || key;
-    const estado = val.ok ? iconOk : iconFail;
+  // ── Pre-chequeos ─────────────────────────────────────────────────────────
+  html += `<div style="border:1px solid var(--border);border-radius:4px;margin-bottom:12px;overflow:hidden">`;
+  html += _testRow(d.clob_ok !== false ? iconOk : iconFail, 'Auth CLOB', d.clob_ok ? `ordenes abiertas: ${d.ordenes_abiertas ?? 0}` : 'fallo');
+  html += _testRow(d.saldo_usdc != null ? iconOk : iconWait, 'Saldo USDC', d.saldo_usdc != null ? `$${d.saldo_usdc}` : 'pendiente');
+  const op = d.orden_prueba || {};
+  html += _testRow(op.status === 'ok' ? iconOk : op.status === 'error' ? iconFail : iconWait,
+    'Orden prueba', op.status === 'ok' ? `${op.order_id?.slice(0,14)}... | ${op.accion}` : (op.error || op.status || 'pendiente'));
+  html += '</div>';
 
-    // Resumen por paso
-    let detalle = '';
-    if (key === '1_clob_auth' && val.ok)
-      detalle = `ordenes abiertas: ${val.ordenes_abiertas}`;
-    else if (key === '2_saldo' && val.ok)
-      detalle = `USDC: $${val.usdc?.toLocaleString('en-US')} | allowance: $${val.allowance?.toLocaleString('en-US')}`;
-    else if (key === '3_mercado' && val.ok)
-      detalle = `${val.question} | ${val.segundos_restantes}s restantes`;
-    else if (key === '4_orderbooks' && val.ok)
-      detalle = `UP ask=${val.UP?.ask} obi=${val.UP?.obi} | DN ask=${val.DN?.ask} obi=${val.DN?.obi}`;
-    else if (key === '5_senal' && val.ok)
-      detalle = `UP:${val.UP?.label}(${val.UP?.combined}) DN:${val.DN?.label}(${val.DN?.combined}) | entraria:${val.entraria}`;
-    else if (key === '6_orden_prueba' && val.ok)
-      detalle = `${val.order_id?.slice(0,16)}... | ${val.accion}`;
-    else if (!val.ok)
-      detalle = val.error || '';
+  // ── Ciclos ───────────────────────────────────────────────────────────────
+  const ciclos = d.ciclos || [];
+  ciclos.forEach(c => {
+    const cIcon = c.status === 'completado' ? iconOk : c.status === 'error' ? iconFail : iconWait;
+    html += `<div style="border:1px solid var(--border);border-radius:4px;margin-bottom:10px;overflow:hidden">`;
 
-    html += `<div style="display:flex;align-items:flex-start;gap:10px;padding:8px 12px;
-      border-bottom:1px solid var(--border);font-family:var(--mono);font-size:11px">
-      <span style="min-width:14px">${estado}</span>
-      <span style="min-width:120px;color:var(--text)">${label}</span>
-      <span style="color:var(--muted);word-break:break-all">${detalle}</span>
+    // Cabecera ciclo
+    html += `<div style="background:var(--card-bg);padding:8px 12px;font-size:11px;font-weight:700;color:var(--text);display:flex;gap:8px;align-items:center">
+      ${cIcon} <span>CICLO ${c.num}/3</span>
+      ${c.mercado ? `<span style="color:var(--muted);font-weight:400">&nbsp;${c.mercado.question}</span>` : ''}
+    </div>`;
+
+    if (c.mercado) {
+      html += _testRow('', 'Mercado', `${c.mercado.secs_al_descubrir}s al descubrir | end: ${c.mercado.end_date?.slice(11,19) || '?'}`);
+    }
+
+    // Snapshots — mostrar primero, ultimo y cada 3do
+    const snaps = c.snapshots || [];
+    if (snaps.length > 0) {
+      html += `<div style="padding:6px 12px;font-size:10px;color:var(--muted);font-family:var(--mono)">
+        <div style="display:grid;grid-template-columns:52px 44px 42px 42px 42px 42px 42px 42px 60px 60px 60px;gap:2px;font-weight:700;padding-bottom:4px;border-bottom:1px solid var(--border)">
+          <span>Hora</span><span>Secs</span><span>UP bid</span><span>UP ask</span><span>UP OBI</span><span>DN bid</span><span>DN ask</span><span>DN OBI</span><span>Sig UP</span><span>Sig DN</span><span>Entrada?</span>
+        </div>`;
+      const toShow = snaps.length <= 8 ? snaps : snaps.filter((_,i) => i === 0 || i === snaps.length-1 || i % 3 === 0);
+      toShow.forEach(s => {
+        const entColor = s.would_enter ? 'var(--green)' : 'var(--muted)';
+        html += `<div style="display:grid;grid-template-columns:52px 44px 42px 42px 42px 42px 42px 42px 60px 60px 60px;gap:2px;padding:2px 0;border-bottom:1px solid rgba(255,255,255,.04)">
+          <span>${s.ts}</span>
+          <span>${s.secs}s</span>
+          <span>${s.UP?.bid}</span><span>${s.UP?.ask}</span><span style="color:${s.UP?.obi>0?'var(--green)':s.UP?.obi<0?'var(--red)':'var(--muted)'}">${s.UP?.obi}</span>
+          <span>${s.DN?.bid}</span><span>${s.DN?.ask}</span><span style="color:${s.DN?.obi>0?'var(--green)':s.DN?.obi<0?'var(--red)':'var(--muted)'}">${s.DN?.obi}</span>
+          <span>${s.sig_up?.label?.replace('STRONG ','')||'?'}</span>
+          <span>${s.sig_dn?.label?.replace('STRONG ','')||'?'}</span>
+          <span style="color:${entColor}">${s.would_enter || (s.ventana_ok ? '-' : 'fuera-vent')}</span>
+        </div>`;
+      });
+      html += `<div style="padding-top:4px;color:var(--orange)">${snaps.length} snapshots totales (mostrando ${toShow.length})</div>`;
+      html += '</div>';
+    }
+
+    // Entrada simulada
+    if (c.sim_entrada) {
+      const e = c.sim_entrada;
+      html += _testRow(iconOk, 'Entrada SIM',
+        `${e.lado} @ ask=${e.ask} | ${e.shares}sh | $${e.usd} | OBI=${e.obi} | sig=${e.sig_combined} | ${e.secs_restantes}s rest.`);
+    } else if (c.status === 'completado') {
+      html += _testRow(iconWait, 'Entrada SIM', 'No se cumplieron condiciones');
+    }
+
+    // Hedge simulado
+    if (c.sim_hedge) {
+      const h = c.sim_hedge;
+      html += _testRow(iconOk, 'Hedge SIM',
+        `${h.lado} @ ${h.ask} | ${h.shares}sh | L1 subio ${h.subida_l1_cents}c | OBI_L2=${h.obi_l2}`);
+    }
+
+    // Early exit simulado
+    if (c.sim_exit) {
+      const x = c.sim_exit;
+      const pColor = x.pnl_sim >= 0 ? 'var(--green)' : 'var(--red)';
+      html += _testRow(x.pnl_sim >= 0 ? iconOk : iconFail, 'Early Exit SIM',
+        `${x.razon} | exit @ ${x.precio_exit} | <span style="color:${pColor}">PnL sim: $${x.pnl_sim}</span>`);
+    }
+
+    // Resolucion y PnL
+    if (c.resolucion_detectada) {
+      html += _testRow(iconOk, 'Resolucion', c.resolucion_detectada);
+    }
+    if (c.resumen) {
+      const pColor = (c.pnl_simulado||0) >= 0 ? 'var(--green)' : 'var(--red)';
+      html += `<div style="padding:7px 12px;font-size:11px;font-family:var(--mono);background:rgba(255,255,255,.03);color:${pColor};font-weight:700">${c.resumen}</div>`;
+    }
+
+    html += '</div>';
+  });
+
+  // ── Resumen final ────────────────────────────────────────────────────────
+  if (d.status === 'done' && d.resumen_final) {
+    const totalPnl = d.pnl_total_simulado || 0;
+    const pColor = totalPnl >= 0 ? 'var(--green)' : 'var(--red)';
+    html += `<div style="padding:12px;border:1px solid ${pColor};border-radius:4px;font-size:12px;font-weight:700;color:${pColor}">
+      ${totalPnl >= 0 ? iconOk : iconFail} ${d.resumen_final}
     </div>`;
   }
-  html += '</div>';
+
+  if (d.status === 'error') {
+    html += `<div style="padding:10px;background:rgba(255,0,0,.08);border-radius:4px;font-size:11px;color:var(--red);font-family:var(--mono)">${d.error}</div>`;
+  }
 
   document.getElementById('test-content').innerHTML = html;
   document.getElementById('btn-copy-json').style.display = 'block';
+}
+
+function _testRow(icon, label, detalle) {
+  return `<div style="display:flex;align-items:flex-start;gap:10px;padding:6px 12px;
+    border-bottom:1px solid var(--border);font-family:var(--mono);font-size:11px">
+    <span style="min-width:14px">${icon}</span>
+    <span style="min-width:120px;color:var(--text)">${label}</span>
+    <span style="color:var(--muted);word-break:break-all">${detalle}</span>
+  </div>`;
 }
 
 function copyJson() {
