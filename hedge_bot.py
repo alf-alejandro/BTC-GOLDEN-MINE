@@ -699,17 +699,25 @@ async def intentar_early_exit(up_m, dn_m, loop):
     if secs_en_pos < MIN_HOLD_SECS:
         return
 
-    # Consultar balance CLOB disponible (read-only)
+    # Consultar balance on-chain (raw units, 6 decimales)
     clob_balance = 0.0
     try:
         ba_params    = BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
         ba           = await loop.run_in_executor(None, lambda: clob.get_balance_allowance(ba_params))
-        clob_balance = float(ba.get("balance", 0))
+        clob_balance = float(ba.get("balance", 0)) / 1_000_000
     except Exception:
         pass
 
     if clob_balance < SELL_MIN_TOKENS:
         return  # silencioso — todavia sincronizando
+
+    # Balance confirmado on-chain → sincronizar cache interno del CLOB
+    try:
+        sync_params = BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
+        await loop.run_in_executor(None, lambda: clob.update_balance_allowance(sync_params))
+        await asyncio.sleep(0.5)
+    except Exception:
+        pass
 
     # Adaptacion live: el CLOB rechaza ventas de tokens cerca de $1 al final del ciclo.
     # Solo bloquear si AMBAS condiciones: precio alto Y poco tiempo restante (<= 90s).
@@ -821,14 +829,18 @@ async def forzar_salida(up_m, dn_m, loop):
         _cerrar_early_exit(lado1, 0.0, razon, up_m, dn_m)
         return
 
-    # Consultar balance CLOB disponible (read-only — no resetea cache)
-    clob_balance = 0.0
+    # Consultar balance on-chain via CLOB (get = read-only, no resetea cache interno)
+    # El balance se retorna en raw units (6 decimales), igual que USDC.
+    clob_balance_raw = 0.0
     try:
-        ba_params    = BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
-        ba           = await loop.run_in_executor(None, lambda: clob.get_balance_allowance(ba_params))
-        clob_balance = float(ba.get("balance", 0))
+        ba_params        = BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
+        ba               = await loop.run_in_executor(None, lambda: clob.get_balance_allowance(ba_params))
+        clob_balance_raw = float(ba.get("balance", 0))
     except Exception:
-        pass  # si falla la consulta, clob_balance=0 y se skipea este ciclo
+        pass  # si falla la consulta, clob_balance_raw=0 y se skipea este ciclo
+
+    # Convertir de raw units a tokens reales (6 decimales)
+    clob_balance = clob_balance_raw / 1_000_000
 
     secs_en_pos = ahora - pos["ts_entrada"] if pos["ts_entrada"] else 0
 
@@ -836,6 +848,16 @@ async def forzar_salida(up_m, dn_m, loop):
         log_ev(f"  Balance CLOB: {clob_balance:.4f} tokens disponibles (restantes: {shares_restantes:.4f}) — {secs_en_pos:.0f}s")
         pos["exit_ts_intento"] = ahora
         return
+
+    # Balance on-chain confirmado → sincronizar el cache INTERNO del CLOB.
+    # Es seguro llamar update ahora porque get_balance_allowance ya mostro balance > 0,
+    # lo que confirma que el bloque fue minado en Polygon.
+    try:
+        sync_params = BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
+        await loop.run_in_executor(None, lambda: clob.update_balance_allowance(sync_params))
+        await asyncio.sleep(0.5)  # breve pausa para que el cache interno procese el sync
+    except Exception:
+        pass
 
     # Vender lo que el CLOB tenga disponible (con factor 0.99 de seguridad)
     shares_a_vender = round(min(clob_balance * 0.99, shares_restantes), 2)
