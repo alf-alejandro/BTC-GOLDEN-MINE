@@ -387,9 +387,24 @@ async def comprar_live(lado: str, token_id: str, ask: float, bid: float, loop) -
             order_info = await loop.run_in_executor(None, clob.get_order, order_id)
             status = order_info.get("status", "") if order_info else ""
             if status in ("FILLED", "MATCHED"):
-                log_ev(f"  FILL BUY {lado} @ {precio:.4f} | {shares} tokens | ${costo_real:.2f}")
-                estado["capital"] -= costo_real
-                return precio, shares, costo_real
+                # Usar size_matched para evitar registrar mas tokens de los que realmente llenaron
+                actual_shares = shares
+                try:
+                    sm = float(order_info.get("size_matched") or 0)
+                    if sm > 0:
+                        actual_shares = sm
+                except Exception:
+                    pass
+                actual_cost = round(actual_shares * precio, 4)
+                log_ev(f"  FILL BUY {lado} @ {precio:.4f} | {actual_shares:.4f}sh | ${actual_cost:.2f}")
+                estado["capital"] -= actual_cost
+                # Notificar al CLOB del nuevo balance de tokens condicionales
+                try:
+                    await loop.run_in_executor(None, lambda: clob.update_balance_allowance(
+                        BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)))
+                except Exception:
+                    pass
+                return precio, actual_shares, actual_cost
         except Exception as e:
             log_ev(f"  Advertencia al consultar orden: {e}")
 
@@ -570,9 +585,23 @@ async def comprar_taker(lado: str, token_id: str, ask: float, loop) -> tuple[flo
                 order_info = await loop.run_in_executor(None, clob.get_order, order_id)
                 status = order_info.get("status", "") if order_info else ""
                 if status in ("FILLED", "MATCHED"):
-                    log_ev(f"  FILL BUY hedge {lado} @ {precio:.4f} | {shares} tokens | ${costo_real:.2f}")
-                    estado["capital"] -= costo_real
-                    return precio, shares, costo_real
+                    actual_shares = shares
+                    try:
+                        sm = float(order_info.get("size_matched") or 0)
+                        if sm > 0:
+                            actual_shares = sm
+                    except Exception:
+                        pass
+                    actual_cost = round(actual_shares * precio, 4)
+                    log_ev(f"  FILL BUY hedge {lado} @ {precio:.4f} | {actual_shares:.4f}sh | ${actual_cost:.2f}")
+                    estado["capital"] -= actual_cost
+                    # Notificar al CLOB del nuevo balance de tokens condicionales
+                    try:
+                        await loop.run_in_executor(None, lambda: clob.update_balance_allowance(
+                            BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)))
+                    except Exception:
+                        pass
+                    return precio, actual_shares, actual_cost
             except Exception as e:
                 log_ev(f"  Advertencia al consultar hedge: {e}")
             await asyncio.sleep(1.0)
