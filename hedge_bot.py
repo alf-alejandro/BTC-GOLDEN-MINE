@@ -88,7 +88,7 @@ EARLY_EXIT_PRICE_DROP = 0.08
 # Floor minimo antes de intentar cualquier venta (evita spam en los primeros segundos).
 # El check real es get_balance_allowance(CONDITIONAL) — solo vende cuando el CLOB confirma balance.
 # Adaptacion live — no existe en la sim.
-MIN_HOLD_SECS = 10
+MIN_HOLD_SECS = 5
 
 # Intervalo entre intentos de venta parcial (segundos).
 SELL_RETRY_INTERVAL = 2.0
