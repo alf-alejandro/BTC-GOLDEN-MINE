@@ -768,19 +768,27 @@ async def main_loop():
     restaurar_estado()
     guardar_estado()
 
-    loop            = asyncio.get_running_loop()
-    signal_up_cache = None
-    signal_dn_cache = None
-    ya_opero_ciclo  = False
-    _ob_errores     = 0   # contador de errores OB consecutivos para backoff
+    loop              = asyncio.get_running_loop()
+    signal_up_cache   = None
+    signal_dn_cache   = None
+    ya_opero_ciclo    = False
+    _ob_errores       = 0     # contador de errores OB consecutivos para backoff
+    _bot_prev_activo  = False # detectar transicion pausa→activo
 
     while True:
         try:
             # 0. Si el bot esta pausado, solo guardar estado y esperar
             if not bot_activo:
+                _bot_prev_activo = False
                 guardar_estado()
                 await asyncio.sleep(2)
                 continue
+
+            # 0c. Si el bot acaba de activarse y hay un ciclo en curso, saltarlo
+            if not _bot_prev_activo and mkt_global is not None:
+                ya_opero_ciclo = True
+                log_ev("Bot activado — saltando ciclo actual, esperando el proximo para entrar")
+            _bot_prev_activo = True
 
             # 0b. Refrescar saldo real cada 10 minutos
             if time.time() - _ts_ultimo_balance > BALANCE_UPDATE_INTERVAL:
@@ -816,13 +824,19 @@ async def main_loop():
 
             if not up_m or not dn_m:
                 _ob_errores += 1
-                # Backoff exponencial: 2s, 4s, 8s, 16s, max 30s
                 espera = min(2 ** _ob_errores, 30)
-                log_ev(f"Error OB ({_ob_errores}): {err_up or err_dn} — reintentando en {espera}s")
+                err_msg = str(err_up or err_dn)
+                # Mensaje corto: solo codigo de status si es 429
+                if "429" in err_msg:
+                    log_ev(f"  429 rate-limit (#{_ob_errores}) — backoff {espera}s")
+                else:
+                    log_ev(f"  Error OB (#{_ob_errores}): {err_msg[:80]} — backoff {espera}s")
                 await asyncio.sleep(espera)
                 continue
 
-            _ob_errores = 0  # reset al recuperarse
+            if _ob_errores > 0:
+                log_ev(f"  OB recuperado tras {_ob_errores} error(es)")
+            _ob_errores = 0
 
             secs = seconds_remaining(mkt_global)
 
