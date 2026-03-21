@@ -106,10 +106,10 @@ def init_clob():
     )
     clob.set_api_creds(clob.create_or_derive_api_creds())
     try:
-        clob.update_profile()
+        clob.update_balance_allowance()
         log.info("Cliente CLOB autorizado (approvals on-chain OK).")
     except Exception as e:
-        log.warning(f"update_profile no disponible o ya activo: {e}")
+        log.warning(f"update_balance_allowance: {e}")
         log.info("Cliente CLOB autorizado.")
 
 # ─── ESTADO GLOBAL ────────────────────────────────────────────────────────────
@@ -728,7 +728,7 @@ async def forzar_salida(up_m, dn_m, loop):
     if intentos >= 5 and intentos % 5 == 0:
         try:
             log_ev(f"  Renovando approvals on-chain (intento #{intentos})...")
-            await loop.run_in_executor(None, clob.update_profile)
+            await loop.run_in_executor(None, clob.update_balance_allowance)
             log_ev(f"  Approvals renovados OK")
         except Exception as e:
             log_ev(f"  Advertencia renovando approvals: {e}")
