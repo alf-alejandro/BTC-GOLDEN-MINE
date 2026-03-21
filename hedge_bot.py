@@ -731,7 +731,8 @@ async def forzar_salida(up_m, dn_m, loop):
             log_ev(f"  Renovando approvals on-chain (intento #{intentos})...")
             await loop.run_in_executor(None, lambda: clob.update_balance_allowance(
                 BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)))
-            log_ev(f"  Approvals renovados OK")
+            log_ev(f"  Approvals renovados OK — esperando propagacion on-chain...")
+            await asyncio.sleep(3.0)
         except Exception as e:
             log_ev(f"  Advertencia renovando approvals: {e}")
 
