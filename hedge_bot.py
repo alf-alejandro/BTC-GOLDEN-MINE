@@ -61,8 +61,9 @@ CHAIN_ID  = 137
 USD_POR_LADO         = 3.75    # monto fijo por lado (lado1 + lado2 = $7.50 por trade)
 
 POLL_INTERVAL        = 1.0
-ORDER_FILL_TIMEOUT   = 30.0    # segundos maximos esperando fill de entrada
+ORDER_FILL_TIMEOUT   = 10.0    # segundos maximos esperando fill de entrada
 ORDER_POLL_INTERVAL  = 2.0     # frecuencia de polling de estado de orden
+MIN_FILL_SECS        = 5.0     # fill en menos de esto = mercado cayendo, salir inmediato
 
 OBI_THRESHOLD        = 0.10
 OBI_WINDOW_SIZE      = 8
@@ -388,12 +389,21 @@ async def comprar_live(lado: str, token_id: str, ask: float, bid: float, loop) -
         return 0.0, 0.0, 0.0
 
     # Esperar fill (el fill llega cuando un vendedor acepta nuestro precio)
-    deadline = time.time() + ORDER_FILL_TIMEOUT
+    ts_orden = time.time()
+    deadline = ts_orden + ORDER_FILL_TIMEOUT
     while time.time() < deadline:
         try:
             order_info = await loop.run_in_executor(None, clob.get_order, order_id)
-            status = order_info.get("status", "")
+            status = order_info.get("status", "") if order_info else ""
             if status in ("FILLED", "MATCHED"):
+                fill_secs = time.time() - ts_orden
+                if fill_secs < MIN_FILL_SECS:
+                    # Fill demasiado rapido = alguien vendio agresivamente contra nosotros
+                    log_ev(f"  ALERTA: fill en {fill_secs:.1f}s — mercado en caida, saliendo sin registrar posicion")
+                    estado["capital"] -= costo_real
+                    await vender_taker(lado, token_id, bid, shares, loop)
+                    estado["capital"] += shares * bid
+                    return 0.0, 0.0, 0.0
                 log_ev(f"  FILL BUY {lado} @ {maker_price:.4f} | {shares} tokens | ${costo_real:.2f}")
                 estado["capital"] -= costo_real
                 return maker_price, shares, costo_real
