@@ -337,15 +337,16 @@ def imprimir_estado(up_m, dn_m, secs, signal_up, signal_dn):
     print(sep)
 
 
-# ─── COMPRA CON ORDEN REAL (Maker Entry — GTC al ask) ─────────────────────────
+# ─── COMPRA TAKER ENTRADA (GTC al ask — fill inmediato, igual que la sim) ──────
 
 async def comprar_live(lado: str, token_id: str, ask: float, bid: float, loop) -> tuple[float, float, float]:
     """
-    Maker Entry: coloca GTC BUY al bid+0.001 (fee_rate_bps=0, sin fee).
-    El orden entra al libro como maker; si el mercado viene a ese precio se llena.
-    Retorna (precio, shares, usd) o (0, 0, 0) si falla o timeout.
+    Taker Entry: compra al ask, cruza el spread y llena inmediatamente.
+    Identico al comportamiento de la simulacion (sim compra al best_ask).
+    Retorna (precio, shares, usd) o (0, 0, 0) si falla.
     """
-    usd = USD_POR_LADO
+    usd    = USD_POR_LADO
+    precio = round(ask, 4)
 
     if usd < MIN_USD_ORDEN:
         log_ev(f"  x Orden muy pequena: ${usd:.2f} < minimo ${MIN_USD_ORDEN:.2f}")
@@ -355,17 +356,15 @@ async def comprar_live(lado: str, token_id: str, ask: float, bid: float, loop) -
         log_ev(f"  x Capital insuficiente: ${estado['capital']:.2f}")
         return 0.0, 0.0, 0.0
 
-    # Precio maker: bid + 0.002
-    maker_price = round(bid + 0.002, 4)
-    shares      = round(usd / maker_price, 2)
+    shares     = round(usd / precio, 2)
     if shares < 5.0:
         shares = 5.0
-    costo_real = round(shares * maker_price, 4)
+    costo_real = round(shares * precio, 4)
 
-    log_ev(f"  Colocando BUY maker {lado} @ {maker_price:.4f} (bid={bid:.4f} ask={ask:.4f}) | {shares} tokens | ${costo_real:.2f}")
+    log_ev(f"  Colocando BUY taker {lado} @ {precio:.4f} (bid={bid:.4f} ask={ask:.4f}) | {shares} tokens | ${costo_real:.2f}")
 
     try:
-        order_args   = OrderArgs(price=maker_price, size=shares, side=BUY,
+        order_args   = OrderArgs(price=precio, size=shares, side=BUY,
                                  token_id=token_id, fee_rate_bps=1000)
         signed_order = await loop.run_in_executor(None, clob.create_order, order_args)
         resp         = await loop.run_in_executor(None, lambda: clob.post_order(signed_order, OrderType.GTC))
@@ -375,45 +374,30 @@ async def comprar_live(lado: str, token_id: str, ask: float, bid: float, loop) -
             return 0.0, 0.0, 0.0
 
         order_id = resp["orderID"]
-        log_ev(f"  Orden BUY colocada: {order_id}")
 
     except Exception as e:
         log_ev(f"  x Error al colocar orden BUY: {e}")
         return 0.0, 0.0, 0.0
 
-    # Esperar fill (el fill llega cuando un vendedor acepta nuestro precio)
     deadline = time.time() + ORDER_FILL_TIMEOUT
     while time.time() < deadline:
         try:
             order_info = await loop.run_in_executor(None, clob.get_order, order_id)
             status = order_info.get("status", "") if order_info else ""
             if status in ("FILLED", "MATCHED"):
-                log_ev(f"  FILL BUY {lado} @ {maker_price:.4f} | {shares} tokens | ${costo_real:.2f}")
+                log_ev(f"  FILL BUY {lado} @ {precio:.4f} | {shares} tokens | ${costo_real:.2f}")
                 estado["capital"] -= costo_real
-                return maker_price, shares, costo_real
+                return precio, shares, costo_real
         except Exception as e:
             log_ev(f"  Advertencia al consultar orden: {e}")
 
         await asyncio.sleep(ORDER_POLL_INTERVAL)
 
-    # Timeout — cancelar
     try:
         await loop.run_in_executor(None, clob.cancel, order_id)
         log_ev(f"  x Orden BUY cancelada por timeout ({ORDER_FILL_TIMEOUT:.0f}s)")
     except Exception as e:
         log_ev(f"  Advertencia al cancelar: {e}")
-
-    # Verificar fill parcial antes del cancel
-    try:
-        order_info = await loop.run_in_executor(None, clob.get_order, order_id)
-        if order_info:
-            size_matched = float(order_info.get("size_matched", 0) or 0)
-            if size_matched > 0:
-                costo_parcial = round(size_matched * maker_price, 4)
-                log_ev(f"  ALERTA: fill parcial detectado — {size_matched} tokens @ {maker_price:.4f} (${costo_parcial:.2f}) — vendiendo inmediatamente")
-                await vender_taker(lado, token_id, bid, size_matched, loop)
-    except Exception as e:
-        log_ev(f"  Advertencia verificando fill parcial: {e}")
 
     return 0.0, 0.0, 0.0
 
@@ -859,7 +843,7 @@ async def main_loop():
     log_ev(f"  Capital: ${CAPITAL_INICIAL:.0f} | Orden fija: ${USD_POR_LADO:.2f}/lado = ${USD_POR_LADO*2:.2f}/trade")
     log_ev(f"  Entrada: precio [{PRECIO_MIN_LADO1:.2f}-{PRECIO_MAX_LADO1:.2f}]")
     log_ev(f"  Hedge:   precio [{HEDGE_PRECIO_MIN:.2f}-{HEDGE_PRECIO_MAX:.2f}] | move_min={HEDGE_MOVE_MIN:.2f}")
-    log_ev(f"  Modo: Maker Entry / Taker Exit")
+    log_ev(f"  Modo: Taker Entry / Taker Exit")
     log_ev("=" * 65)
 
     restaurar_estado()
