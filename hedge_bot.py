@@ -84,6 +84,11 @@ EARLY_EXIT_SECS       = 60     # sale si lleva 60s sin hedge
 EARLY_EXIT_OBI_FLIP   = -0.15
 EARLY_EXIT_PRICE_DROP = 0.08
 
+# Minimo de segundos en posicion antes de intentar cualquier venta.
+# El CLOB necesita ~30s para acreditar el balance post-fill en su cache.
+# Adaptacion live — no existe en la sim.
+MIN_HOLD_SECS = 30
+
 RESOLVED_UP_THRESH = 0.97   # identico a sim v8
 RESOLVED_DN_THRESH = 0.03   # identico a sim v8
 
@@ -669,9 +674,13 @@ async def intentar_early_exit(up_m, dn_m, loop):
     secs_en_pos = time.time() - pos["ts_entrada"] if pos["ts_entrada"] else 0
     caida       = pos["lado1_precio"] - bid_lado1
 
+    # Adaptacion live: esperar MIN_HOLD_SECS antes de cualquier venta.
+    # El CLOB necesita ~30s para acreditar el balance post-fill en su cache.
+    if secs_en_pos < MIN_HOLD_SECS:
+        return
+
     # Adaptacion live: el CLOB rechaza ventas de tokens cerca de $1 al final del ciclo.
     # Solo bloquear si AMBAS condiciones: precio alto Y poco tiempo restante (<= 90s).
-    # Con tiempo suficiente, dejar que la estrategia intente vender normalmente.
     secs_left = seconds_remaining(mkt_global)
     if bid_lado1 >= NEAR_RESOLUTION_THRESH and secs_left is not None and secs_left <= 90:
         return
