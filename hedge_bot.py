@@ -50,8 +50,9 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 POLYMARKET_KEY  = os.getenv("POLYMARKET_KEY")
 PROXY_ADDRESS   = os.getenv("PROXY_ADDRESS")
 CAPITAL_INICIAL = float(os.environ.get("CAPITAL_INICIAL", "100.0"))
-STATE_FILE      = os.environ.get("STATE_FILE", "/app/data/state.json")
-LOG_FILE        = os.environ.get("LOG_FILE",   "/app/data/hedge_log.json")
+STATE_FILE      = os.environ.get("STATE_FILE",   "/app/data/state.json")
+LOG_FILE        = os.environ.get("LOG_FILE",     "/app/data/hedge_log.json")
+EVENTS_FILE     = os.environ.get("EVENTS_FILE",  "/app/data/events.log")
 SYMBOL          = os.environ.get("SYMBOL", "BTC").upper()
 
 CLOB_HOST = "https://clob.polymarket.com"
@@ -290,9 +291,20 @@ def restaurar_estado():
 # ─── UTILIDADES ───────────────────────────────────────────────────────────────
 
 def log_ev(msg: str):
-    ts = datetime.now().strftime("%H:%M:%S")
-    eventos.append(f"[{ts}] {msg}")
+    ts  = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ts_short = datetime.now().strftime("%H:%M:%S")
+    line = f"[{ts_short}] {msg}"
+    eventos.append(line)
     log.info(msg)
+    # Persistir en archivo para descarga de debug
+    try:
+        dirpath = os.path.dirname(EVENTS_FILE)
+        if dirpath:
+            os.makedirs(dirpath, exist_ok=True)
+        with open(EVENTS_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{ts},{msg}\n")
+    except Exception:
+        pass
 
 def mid(m) -> float:
     b, a = m["best_bid"], m["best_ask"]
@@ -1471,6 +1483,8 @@ if __name__ == "__main__":
                     self._serve_trades()
                 elif self.path == "/api/csv":
                     self._serve_csv()
+                elif self.path == "/api/log-csv":
+                    self._serve_log_csv()
                 elif self.path == "/api/balance":
                     self._serve_balance()
                 elif self.path == "/api/test" or self.path == "/api/test/status":
@@ -1562,6 +1576,28 @@ if __name__ == "__main__":
                 self.send_response(200)
                 self.send_header("Content-Type", "text/csv")
                 self.send_header("Content-Disposition", "attachment; filename=trades.csv")
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                self._send(500, "text/plain", str(e).encode())
+
+        def _serve_log_csv(self):
+            try:
+                buf = io.StringIO()
+                buf.write("timestamp,message\n")
+                if os.path.isfile(EVENTS_FILE):
+                    with open(EVENTS_FILE, encoding="utf-8") as f:
+                        buf.write(f.read())
+                else:
+                    # Fallback: eventos en memoria
+                    for ev in eventos:
+                        # formato "[HH:MM:SS] msg" -> extraer
+                        buf.write(f",{ev}\n")
+                body = buf.getvalue().encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header("Content-Disposition", "attachment; filename=events_log.csv")
+                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(body)
             except Exception as e:

@@ -93,6 +93,8 @@
   .btn-bal:hover { background: rgba(255,211,42,.08); }
   .btn-test  { background: transparent; color: var(--orange); border: 1px solid var(--orange); }
   .btn-test:hover { background: rgba(255,107,53,.08); }
+  .btn-log   { background: transparent; color: var(--muted); border: 1px solid var(--border2); }
+  .btn-log:hover { background: rgba(255,255,255,.05); }
 
   /* Modal saldo */
   .modal-overlay {
@@ -273,6 +275,7 @@
     <button class="btn btn-start" id="btn-start" onclick="startBot()">&#9654; START</button>
     <button class="btn btn-stop"  id="btn-stop"  onclick="stopBot()" disabled>&#9632; STOP</button>
     <button class="btn btn-csv"   onclick="downloadCSV()">&#8681; CSV</button>
+    <button class="btn btn-log"   onclick="downloadLog()">&#8681; LOG</button>
     <button class="btn btn-bal"   onclick="checkBalance()" id="btn-balance">&#9679; SALDO</button>
     <button class="btn btn-test"  onclick="runTest()"     id="btn-test">&#9881; TEST</button>
   </div>
@@ -712,6 +715,7 @@ async function stopBot() {
 }
 
 function downloadCSV() { window.location = '/api/csv'; }
+function downloadLog() { window.location = '/api/log-csv'; }
 
 async function checkBalance() {
   document.getElementById('balance-overlay').classList.add('open');
