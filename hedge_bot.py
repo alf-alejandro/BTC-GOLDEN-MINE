@@ -107,8 +107,7 @@ def init_clob():
     clob.set_api_creds(clob.create_or_derive_api_creds())
     try:
         clob.update_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
-        clob.update_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL))
-        log.info("Cliente CLOB autorizado (approvals COLLATERAL + CONDITIONAL OK).")
+        log.info("Cliente CLOB autorizado (COLLATERAL OK).")
     except Exception as e:
         log.warning(f"update_balance_allowance: {e}")
         log.info("Cliente CLOB autorizado.")
@@ -398,16 +397,10 @@ async def comprar_live(lado: str, token_id: str, ask: float, bid: float, loop) -
                 actual_cost = round(actual_shares * precio, 4)
                 log_ev(f"  FILL BUY {lado} @ {precio:.4f} | {actual_shares:.4f}sh | ${actual_cost:.2f}")
                 estado["capital"] -= actual_cost
-                # Esperar settlement on-chain (Polygon ~2-5s) ANTES de actualizar balance.
-                # Si se llama update_balance_allowance demasiado rapido, la chain aun no tiene
-                # los tokens y el CLOB graba balance=0, bloqueando todos los sells posteriores.
-                await asyncio.sleep(6.0)
-                try:
-                    await loop.run_in_executor(None, lambda: clob.update_balance_allowance(
-                        BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)))
-                    log_ev(f"  Balance CONDITIONAL actualizado OK")
-                except Exception:
-                    pass
+                # Esperar 10s para que el CLOB procese el trade y acredite el balance
+                # de tokens condicionales de forma natural (SIN llamar update_balance_allowance
+                # que resetea el cache a 0 si la chain todavia no confirmo el bloque).
+                await asyncio.sleep(10.0)
                 return precio, actual_shares, actual_cost
         except Exception as e:
             log_ev(f"  Advertencia al consultar orden: {e}")
@@ -441,13 +434,6 @@ async def vender_taker(lado: str, token_id: str, bid: float, shares: float, loop
     exit_precio = max(round(bid, 4), 0.01)
 
     # DIAGNOSTICO: ver que ve el CLOB antes de vender (balance e allowance)
-    try:
-        ba = await loop.run_in_executor(None, lambda: clob.get_balance_allowance(
-            BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)))
-        log_ev(f"  [DIAG] CLOB CONDITIONAL balance={ba.get('balance','?')} allowance={ba.get('allowance','?')}")
-    except Exception as e:
-        log_ev(f"  [DIAG] get_balance_allowance error: {e}")
-
     log_ev(f"  Colocando SELL taker {lado} @ {exit_precio:.4f} | {shares_sell} tokens (99% de {shares})")
 
     try:
@@ -616,14 +602,7 @@ async def comprar_taker(lado: str, token_id: str, ask: float, loop) -> tuple[flo
                     actual_cost = round(actual_shares * precio, 4)
                     log_ev(f"  FILL BUY hedge {lado} @ {precio:.4f} | {actual_shares:.4f}sh | ${actual_cost:.2f}")
                     estado["capital"] -= actual_cost
-                    # Esperar settlement on-chain antes de actualizar balance
-                    await asyncio.sleep(6.0)
-                    try:
-                        await loop.run_in_executor(None, lambda: clob.update_balance_allowance(
-                            BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)))
-                        log_ev(f"  Balance CONDITIONAL hedge actualizado OK")
-                    except Exception:
-                        pass
+                    await asyncio.sleep(10.0)
                     return precio, actual_shares, actual_cost
             except Exception as e:
                 log_ev(f"  Advertencia al consultar hedge: {e}")
@@ -776,17 +755,6 @@ async def forzar_salida(up_m, dn_m, loop):
     # Alerta si llevamos demasiados reintentos sin exito
     if intentos == 15:
         log_ev(f"  ALERTA: {intentos} reintentos fallidos — posible problema de allowance on-chain")
-
-    # Renovar approvals on-chain cada 5 intentos a partir del 5
-    if intentos >= 5 and intentos % 5 == 0:
-        try:
-            log_ev(f"  Renovando approvals on-chain (intento #{intentos})...")
-            await loop.run_in_executor(None, lambda: clob.update_balance_allowance(
-                BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)))
-            log_ev(f"  Approvals renovados OK — esperando propagacion on-chain...")
-            await asyncio.sleep(3.0)
-        except Exception as e:
-            log_ev(f"  Advertencia renovando approvals: {e}")
 
     # Backoff a partir del intento 10: esperar mas entre intentos para no saturar la API
     if intentos >= 10:
