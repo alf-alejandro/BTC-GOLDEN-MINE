@@ -659,13 +659,24 @@ async def forzar_salida(up_m, dn_m, loop):
     else:
         precio_exit = max(round(bid_raw - 0.05, 4), 0.01)
 
-    log_ev(f"  REINTENTO VENTA #{intentos} {lado1} @ {precio_exit:.4f} (bid={bid_raw:.4f})")
+    # Solo loguear intento #1, multiples de 5, y cuando cambia el escalon de precio
+    if intentos == 1 or intentos % 5 == 0:
+        log_ev(f"  REINTENTO VENTA #{intentos} {lado1} @ {precio_exit:.4f} (bid={bid_raw:.4f})")
+
+    # Alerta si llevamos demasiados reintentos sin exito
+    if intentos == 15:
+        log_ev(f"  ALERTA: {intentos} reintentos fallidos — posible problema de allowance on-chain")
+
+    # Backoff a partir del intento 10: esperar mas entre intentos para no saturar la API
+    if intentos >= 10:
+        await asyncio.sleep(3.0)
 
     pos["exit_intentos"] += 1
     exit_precio = await vender_taker(lado1, token_id, precio_exit, pos["lado1_shares"], loop)
 
     if exit_precio == 0.0:
-        log_ev(f"  x Reintento #{intentos} fallido — proximo en siguiente tick")
+        if intentos <= 3 or intentos % 5 == 0:
+            log_ev(f"  x Reintento #{intentos} fallido")
         guardar_estado(up_m, dn_m)
         return
 
