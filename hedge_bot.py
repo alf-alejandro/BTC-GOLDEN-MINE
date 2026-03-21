@@ -85,9 +85,12 @@ EARLY_EXIT_OBI_FLIP   = -0.15
 EARLY_EXIT_PRICE_DROP = 0.08
 
 # Minimo de segundos en posicion antes de intentar cualquier venta.
-# El CLOB necesita ~30s para acreditar el balance post-fill en su cache.
+# El CLOB necesita ~15s para acreditar el balance post-fill en su cache.
 # Adaptacion live — no existe en la sim.
-MIN_HOLD_SECS = 30
+MIN_HOLD_SECS = 15
+
+# Intervalo minimo entre reintentos de venta (segundos).
+SELL_RETRY_INTERVAL = 5.0
 
 RESOLVED_UP_THRESH = 0.97   # identico a sim v8
 RESOLVED_DN_THRESH = 0.03   # identico a sim v8
@@ -152,6 +155,7 @@ pos = {
     "en_salida":        False,   # True cuando hay early exit pendiente de confirmar
     "exit_razon":       None,    # razon del early exit (para el log)
     "exit_intentos":    0,       # cuantos reintentos de venta llevamos
+    "exit_ts_intento":  0.0,     # timestamp del ultimo intento de venta (throttle 5s)
     "lado1_token_id":   None,    # guardado al comprar — usado en todas las ventas
     "capital_usado":    0.0,
     "ts_entrada":       None,
@@ -701,10 +705,11 @@ async def intentar_early_exit(up_m, dn_m, loop):
     exit_precio = await vender_taker(lado1, token_id, bid_lado1, pos["lado1_shares"], loop)
     if exit_precio == 0.0:
         # Venta fallida — marcar para reintento continuo, NO abandonar la posicion
-        pos["en_salida"]     = True
-        pos["exit_razon"]    = razon
-        pos["exit_intentos"] = 1
-        log_ev(f"  EARLY EXIT: primer intento fallido — reintentando cada tick hasta confirmar venta")
+        pos["en_salida"]       = True
+        pos["exit_razon"]      = razon
+        pos["exit_intentos"]   = 1
+        pos["exit_ts_intento"] = time.time()
+        log_ev(f"  EARLY EXIT: primer intento fallido — reintentando cada {SELL_RETRY_INTERVAL:.0f}s")
         guardar_estado(up_m, dn_m)
         return
 
@@ -737,7 +742,7 @@ def _cerrar_early_exit(lado1: str, exit_precio: float, razon: str, up_m, dn_m):
 async def forzar_salida(up_m, dn_m, loop):
     """
     Llamado cada tick cuando pos["en_salida"]=True.
-    Reintenta la venta con precio cada vez mas agresivo hasta confirmar el fill.
+    Reintenta la venta cada SELL_RETRY_INTERVAL segundos hasta confirmar el fill.
     Bajo ningun concepto resetea la posicion sin haber vendido primero.
 
     Escalado de precio:
@@ -745,6 +750,11 @@ async def forzar_salida(up_m, dn_m, loop):
       intentos 4-6  : bid - 0.02           (ligeramente agresivo)
       intentos 7+   : bid - 0.05 (min 0.01) (dump total — garantiza fill)
     """
+    # Throttle: solo reintentar cada SELL_RETRY_INTERVAL segundos
+    ahora = time.time()
+    if ahora - pos["exit_ts_intento"] < SELL_RETRY_INTERVAL:
+        return
+
     lado1    = pos["lado1_side"]
     intentos = pos["exit_intentos"]
     bid_raw  = up_m["best_bid"] if lado1 == "UP" else dn_m["best_bid"]
@@ -757,19 +767,14 @@ async def forzar_salida(up_m, dn_m, loop):
     else:
         precio_exit = max(round(bid_raw - 0.05, 4), 0.01)
 
-    # Solo loguear intento #1, multiples de 5, y cuando cambia el escalon de precio
-    if intentos == 1 or intentos % 5 == 0:
-        log_ev(f"  REINTENTO VENTA #{intentos} {lado1} @ {precio_exit:.4f} (bid={bid_raw:.4f})")
+    log_ev(f"  REINTENTO VENTA #{intentos} {lado1} @ {precio_exit:.4f} (bid={bid_raw:.4f})")
 
     # Alerta si llevamos demasiados reintentos sin exito
-    if intentos == 15:
+    if intentos == 6:
         log_ev(f"  ALERTA: {intentos} reintentos fallidos — posible problema de allowance on-chain")
 
-    # Backoff a partir del intento 10: esperar mas entre intentos para no saturar la API
-    if intentos >= 10:
-        await asyncio.sleep(3.0)
-
-    pos["exit_intentos"] += 1
+    pos["exit_intentos"]   += 1
+    pos["exit_ts_intento"]  = ahora
     exit_precio = await vender_taker(lado1, token_id, precio_exit, pos["lado1_shares"], loop)
 
     if exit_precio == 0.0:
