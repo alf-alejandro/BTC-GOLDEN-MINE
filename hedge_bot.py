@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from collections import deque
 
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, OrderType
+from py_clob_client.clob_types import OrderArgs, OrderType, BalanceAllowanceParams, AssetType
 from py_clob_client.order_builder.constants import BUY, SELL
 
 from strategy_core import (
@@ -106,8 +106,9 @@ def init_clob():
     )
     clob.set_api_creds(clob.create_or_derive_api_creds())
     try:
-        clob.update_balance_allowance()
-        log.info("Cliente CLOB autorizado (approvals on-chain OK).")
+        clob.update_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+        clob.update_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL))
+        log.info("Cliente CLOB autorizado (approvals COLLATERAL + CONDITIONAL OK).")
     except Exception as e:
         log.warning(f"update_balance_allowance: {e}")
         log.info("Cliente CLOB autorizado.")
@@ -728,7 +729,8 @@ async def forzar_salida(up_m, dn_m, loop):
     if intentos >= 5 and intentos % 5 == 0:
         try:
             log_ev(f"  Renovando approvals on-chain (intento #{intentos})...")
-            await loop.run_in_executor(None, clob.update_balance_allowance)
+            await loop.run_in_executor(None, lambda: clob.update_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)))
             log_ev(f"  Approvals renovados OK")
         except Exception as e:
             log_ev(f"  Advertencia renovando approvals: {e}")
