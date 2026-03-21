@@ -439,6 +439,15 @@ async def vender_taker(lado: str, token_id: str, bid: float, shares: float, loop
     if shares_sell < 1.0:
         shares_sell = shares  # si es muy pequeno, intentar todo igual
     exit_precio = max(round(bid, 4), 0.01)
+
+    # DIAGNOSTICO: ver que ve el CLOB antes de vender (balance e allowance)
+    try:
+        ba = await loop.run_in_executor(None, lambda: clob.get_balance_allowance(
+            BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)))
+        log_ev(f"  [DIAG] CLOB CONDITIONAL balance={ba.get('balance','?')} allowance={ba.get('allowance','?')}")
+    except Exception as e:
+        log_ev(f"  [DIAG] get_balance_allowance error: {e}")
+
     log_ev(f"  Colocando SELL taker {lado} @ {exit_precio:.4f} | {shares_sell} tokens (99% de {shares})")
 
     try:
