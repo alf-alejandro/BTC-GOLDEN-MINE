@@ -669,9 +669,11 @@ async def intentar_early_exit(up_m, dn_m, loop):
     secs_en_pos = time.time() - pos["ts_entrada"] if pos["ts_entrada"] else 0
     caida       = pos["lado1_precio"] - bid_lado1
 
-    # Adaptacion live: el CLOB rechaza ventas cuando el token se acerca a $1.
-    # Si bid >= NEAR_RESOLUTION_THRESH, no intentar vender — esperar resolucion a $1.
-    if bid_lado1 >= NEAR_RESOLUTION_THRESH:
+    # Adaptacion live: el CLOB rechaza ventas de tokens cerca de $1 al final del ciclo.
+    # Solo bloquear si AMBAS condiciones: precio alto Y poco tiempo restante (<= 90s).
+    # Con tiempo suficiente, dejar que la estrategia intente vender normalmente.
+    secs_left = seconds_remaining(mkt_global)
+    if bid_lado1 >= NEAR_RESOLUTION_THRESH and secs_left is not None and secs_left <= 90:
         return
 
     razon = None
