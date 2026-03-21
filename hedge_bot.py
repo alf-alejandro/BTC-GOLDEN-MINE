@@ -548,7 +548,8 @@ async def intentar_entrada(up_m, dn_m, secs, loop) -> bool:
 
     precio, shares, usd = await comprar_live(lado, token_id, ask, bid, loop)
     if usd == 0.0:
-        return False
+        log_ev(f"  Orden no llenada — esperando proximo ciclo")
+        return True  # marcar ciclo como intentado, no reintentar
 
     pos["activa"]          = True
     pos["lado1_side"]      = lado
