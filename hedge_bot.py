@@ -188,6 +188,7 @@ def guardar_estado(up_m=None, dn_m=None):
                 "ts":              datetime.now().isoformat(),
                 "capital":         round(estado["capital"], 4),
                 "capital_inicial": CAPITAL_INICIAL,
+                "capital_base":    round(estado["capital_base"], 4) if estado["capital_base"] > 0 else CAPITAL_INICIAL,
                 "pnl_total":       round(estado["pnl_total"], 4),
                 "roi":             round(roi, 2),
                 "peak_capital":    round(estado["peak_capital"], 4),

@@ -481,6 +481,7 @@ const capitalChart = new Chart(ctx, {
 });
 
 let CAPITAL_INICIAL = 100;
+let CAPITAL_BASE    = 100;
 let lastTradeCount  = 0;
 let lastLogHash     = '';
 let mktEndDate      = null;
@@ -521,6 +522,7 @@ async function fetchTrades() {
 
 function updateDashboard(d) {
   CAPITAL_INICIAL = d.capital_inicial || CAPITAL_INICIAL;
+  CAPITAL_BASE    = d.capital_base    || CAPITAL_INICIAL;
 
   const ahora    = Date.now();
   const tsBot    = d.ts ? new Date(d.ts).getTime() : 0;
@@ -660,7 +662,7 @@ function updateTrades(trades) {
     const n      = trades.length - i;
     const hora   = t.ts ? t.ts.substring(11, 19) : '&#8212;';
     const gano   = t.pnl >= 0;
-    const roi    = ((t.capital - CAPITAL_INICIAL) / CAPITAL_INICIAL * 100).toFixed(2);
+    const roi    = ((t.capital - CAPITAL_BASE) / CAPITAL_BASE * 100).toFixed(2);
     const l1c    = t.lado1_side === 'UP' ? 'var(--green)' : 'var(--red)';
     const l2c    = t.lado2_side === 'UP' ? 'var(--green)' : t.lado2_side === 'DOWN' ? 'var(--red)' : 'var(--muted)';
     const tipo   = t.tipo === 'EARLY_EXIT' ? 'EXIT' : 'RES';
@@ -686,7 +688,7 @@ function updateTrades(trades) {
 function updateChart(trades) {
   if (!trades.length) return;
   capitalChart.data.labels           = ['START', ...trades.map((_, i) => `T${i+1}`)];
-  capitalChart.data.datasets[0].data = [CAPITAL_INICIAL, ...trades.map(t => t.capital)];
+  capitalChart.data.datasets[0].data = [CAPITAL_BASE, ...trades.map(t => t.capital)];
   capitalChart.update();
 }
 
