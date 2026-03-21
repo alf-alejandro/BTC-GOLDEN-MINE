@@ -461,24 +461,25 @@ def evaluar_senal(up_m, dn_m):
     if up_m["spread"] > SPREAD_MAX or dn_m["spread"] > SPREAD_MAX:
         return signal_up, signal_dn, None
 
+    # Verificar precio maker real (bid+0.001), no el ask
+    # Evita entrar en zona <PRECIO_MIN cuando el spread es amplio
+    maker_up = round(up_m["best_bid"] + 0.001, 4)
+    maker_dn = round(dn_m["best_bid"] + 0.001, 4)
+
     if signal_up["combined"] >= OBI_STRONG_THRESHOLD:
-        ask = up_m["best_ask"]
-        if PRECIO_MIN_LADO1 <= ask <= PRECIO_MAX_LADO1:
+        if PRECIO_MIN_LADO1 <= maker_up <= PRECIO_MAX_LADO1:
             return signal_up, signal_dn, "UP"
 
     if signal_dn["combined"] >= OBI_STRONG_THRESHOLD:
-        ask = dn_m["best_ask"]
-        if PRECIO_MIN_LADO1 <= ask <= PRECIO_MAX_LADO1:
+        if PRECIO_MIN_LADO1 <= maker_dn <= PRECIO_MAX_LADO1:
             return signal_up, signal_dn, "DOWN"
 
     if signal_up["label"] in ("UP", "STRONG UP") and signal_up["combined"] > signal_dn["combined"]:
-        ask = up_m["best_ask"]
-        if PRECIO_MIN_LADO1 <= ask <= PRECIO_MAX_LADO1:
+        if PRECIO_MIN_LADO1 <= maker_up <= PRECIO_MAX_LADO1:
             return signal_up, signal_dn, "UP"
 
     if signal_dn["label"] in ("UP", "STRONG UP") and signal_dn["combined"] > signal_up["combined"]:
-        ask = dn_m["best_ask"]
-        if PRECIO_MIN_LADO1 <= ask <= PRECIO_MAX_LADO1:
+        if PRECIO_MIN_LADO1 <= maker_dn <= PRECIO_MAX_LADO1:
             return signal_up, signal_dn, "DOWN"
 
     return signal_up, signal_dn, None
