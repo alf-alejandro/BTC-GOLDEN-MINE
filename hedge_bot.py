@@ -1420,17 +1420,19 @@ if __name__ == "__main__":
         log.info(f"Dashboard en http://0.0.0.0:{PORT}")
         server.serve_forever()
 
-    # Inicializar cliente CLOB con credenciales reales
-    init_clob()
-
-    # Cargar balance real antes de arrancar el servidor — así el KPI ya muestra el saldo
-    _refrescar_balance_real()
-
-    # Arrancar servidor web PRIMERO — Railway necesita que / responda antes del healthcheck
+    # Arrancar servidor web PRIMERO — Railway necesita que / responda en <30s
     t = threading.Thread(target=run_server, daemon=True)
     t.start()
     time.sleep(1)
-    log.info("Servidor web listo — arrancando bot...")
+    log.info("Servidor web listo.")
+
+    # Inicializar cliente CLOB (despues del healthcheck)
+    init_clob()
+
+    # Cargar balance real
+    _refrescar_balance_real()
+
+    log.info("Inicializacion completa — arrancando bot...")
 
     try:
         asyncio.run(main_loop())
