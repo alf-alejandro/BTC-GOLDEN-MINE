@@ -855,7 +855,7 @@ async def main_loop():
     log_ev(f"  Capital: ${CAPITAL_INICIAL:.0f} | Orden fija: ${USD_POR_LADO:.2f}/lado = ${USD_POR_LADO*2:.2f}/trade")
     log_ev(f"  Entrada: precio [{PRECIO_MIN_LADO1:.2f}-{PRECIO_MAX_LADO1:.2f}]")
     log_ev(f"  Hedge:   precio [{HEDGE_PRECIO_MIN:.2f}-{HEDGE_PRECIO_MAX:.2f}] | move_min={HEDGE_MOVE_MIN:.2f}")
-    log_ev(f"  Modo: Taker Entry / Taker Exit")
+    log_ev(f"  Modo: Maker Entry (mid-price) / Taker Exit")
     log_ev("=" * 65)
 
     restaurar_estado()
