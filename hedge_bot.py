@@ -61,7 +61,7 @@ CHAIN_ID  = 137
 USD_POR_LADO         = 3.75    # monto fijo por lado (lado1 + lado2 = $7.50 por trade)
 
 POLL_INTERVAL        = 1.0
-ORDER_FILL_TIMEOUT   = 4.0     # segundos maximos esperando fill de entrada
+ORDER_FILL_TIMEOUT   = 5.0     # segundos maximos esperando fill de entrada
 ORDER_POLL_INTERVAL  = 2.0     # frecuencia de polling de estado de orden
 
 OBI_THRESHOLD        = 0.10
