@@ -1,10 +1,10 @@
 """
 hedge_bot.py — Live Trading Bot: Hedge Dinamico BTC Up/Down 5m en Polymarket
 
-Estrategia 100% fiel a hedge_sim.py v8 — Maker Entry / Taker Exit
+Estrategia 100% fiel a hedge_sim.py v8 — Maker Entry (mid) / Taker Exit
 
 CAMBIOS vs simulacion:
-  - comprar()            -> coloca orden GTC BUY al ask (Maker Entry) y espera fill
+  - comprar()            -> coloca orden GTC BUY al mid-price (bid+ask)/2 y espera fill
   - intentar_early_exit()-> coloca orden GTC SELL al bid (Taker Exit, cruza inmediato)
   - Resolucion           -> identica a sim (Polymarket auto-liquida tokens ganadores)
 
@@ -338,16 +338,18 @@ def imprimir_estado(up_m, dn_m, secs, signal_up, signal_dn):
     print(sep)
 
 
-# ─── COMPRA TAKER ENTRADA (GTC al ask — fill inmediato, igual que la sim) ──────
+# ─── COMPRA MAKER ENTRADA (GTC al mid — entra al libro, filtro natural de volatilidad)
 
 async def comprar_live(lado: str, token_id: str, ask: float, bid: float, loop) -> tuple[float, float, float]:
     """
-    Taker Entry: compra al ask, cruza el spread y llena inmediatamente.
-    Identico al comportamiento de la simulacion (sim compra al best_ask).
-    Retorna (precio, shares, usd) o (0, 0, 0) si falla.
+    Maker Entry: coloca GTC BUY al mid-price (bid+ask)/2.
+    Entra al libro sin cruzar el spread — si el mercado tiene liquidez real llena
+    en pocos segundos; si hay volatilidad abrupta simplemente no llena (filtro natural).
+    El fill lento da tiempo al CLOB para acreditar el balance antes de cualquier venta.
+    Retorna (precio, shares, usd) o (0, 0, 0) si falla o timeout.
     """
     usd    = USD_POR_LADO
-    precio = round(ask, 4)
+    precio = round((bid + ask) / 2, 4)
 
     if usd < MIN_USD_ORDEN:
         log_ev(f"  x Orden muy pequena: ${usd:.2f} < minimo ${MIN_USD_ORDEN:.2f}")
@@ -362,7 +364,7 @@ async def comprar_live(lado: str, token_id: str, ask: float, bid: float, loop) -
         shares = 5.0
     costo_real = round(shares * precio, 4)
 
-    log_ev(f"  Colocando BUY taker {lado} @ {precio:.4f} (bid={bid:.4f} ask={ask:.4f}) | {shares} tokens | ${costo_real:.2f}")
+    log_ev(f"  Colocando BUY maker {lado} @ {precio:.4f} mid (bid={bid:.4f} ask={ask:.4f}) | {shares} tokens | ${costo_real:.2f}")
 
     try:
         order_args   = OrderArgs(price=precio, size=shares, side=BUY,
@@ -397,10 +399,6 @@ async def comprar_live(lado: str, token_id: str, ask: float, bid: float, loop) -
                 actual_cost = round(actual_shares * precio, 4)
                 log_ev(f"  FILL BUY {lado} @ {precio:.4f} | {actual_shares:.4f}sh | ${actual_cost:.2f}")
                 estado["capital"] -= actual_cost
-                # Esperar 10s para que el CLOB procese el trade y acredite el balance
-                # de tokens condicionales de forma natural (SIN llamar update_balance_allowance
-                # que resetea el cache a 0 si la chain todavia no confirmo el bloque).
-                await asyncio.sleep(10.0)
                 return precio, actual_shares, actual_cost
         except Exception as e:
             log_ev(f"  Advertencia al consultar orden: {e}")
@@ -421,20 +419,11 @@ async def comprar_live(lado: str, token_id: str, ask: float, bid: float, loop) -
 async def vender_taker(lado: str, token_id: str, bid: float, shares: float, loop) -> float:
     """
     Coloca una orden GTC SELL al bid (Taker Exit — cruza con compradores existentes).
-    Vende el 99% de los shares para evitar el cache stale del CLOB (issue conocido de
-    Polymarket: instant-fill buys dejan el cache por debajo del balance real, y vender
-    el 100% excede el techo del cache aunque la chain tenga los tokens completos).
-    El 1% restante se cobra cuando el mercado resuelve a $1.
     Retorna el precio de ejecucion o 0.0 si falla.
     """
-    # Vender 99% — workaround para el cache stale del CLOB post-taker-buy
-    shares_sell = round(shares * 0.99, 2)
-    if shares_sell < 1.0:
-        shares_sell = shares  # si es muy pequeno, intentar todo igual
+    shares_sell = shares
     exit_precio = max(round(bid, 4), 0.01)
-
-    # DIAGNOSTICO: ver que ve el CLOB antes de vender (balance e allowance)
-    log_ev(f"  Colocando SELL taker {lado} @ {exit_precio:.4f} | {shares_sell} tokens (99% de {shares})")
+    log_ev(f"  Colocando SELL taker {lado} @ {exit_precio:.4f} | {shares_sell} tokens")
 
     try:
         order_args   = OrderArgs(price=exit_precio, size=shares_sell, side=SELL,
@@ -488,10 +477,9 @@ def evaluar_senal(up_m, dn_m):
     if up_m["spread"] > SPREAD_MAX or dn_m["spread"] > SPREAD_MAX:
         return signal_up, signal_dn, None
 
-    # Verificar precio maker real (bid+0.001), no el ask
-    # Evita entrar en zona <PRECIO_MIN cuando el spread es amplio
-    maker_up = round(up_m["best_bid"] + 0.001, 4)
-    maker_dn = round(dn_m["best_bid"] + 0.001, 4)
+    # Precio de entrada: mid-price (bid+ask)/2
+    maker_up = round((up_m["best_bid"] + up_m["best_ask"]) / 2, 4)
+    maker_dn = round((dn_m["best_bid"] + dn_m["best_ask"]) / 2, 4)
 
     if signal_up["combined"] >= OBI_STRONG_THRESHOLD:
         if PRECIO_MIN_LADO1 <= maker_up <= PRECIO_MAX_LADO1:
