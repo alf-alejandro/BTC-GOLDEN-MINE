@@ -90,8 +90,11 @@ EARLY_EXIT_PRICE_DROP = 0.08
 # Adaptacion live — no existe en la sim.
 MIN_HOLD_SECS = 10
 
-# Intervalo minimo entre reintentos de venta (segundos).
-SELL_RETRY_INTERVAL = 5.0
+# Intervalo entre intentos de venta parcial (segundos).
+SELL_RETRY_INTERVAL = 2.0
+
+# Minimo de tokens para colocar una orden SELL (evita ordenes por debajo del minimo del CLOB).
+SELL_MIN_TOKENS = 1.0
 
 RESOLVED_UP_THRESH = 0.97   # identico a sim v8
 RESOLVED_DN_THRESH = 0.03   # identico a sim v8
@@ -156,7 +159,9 @@ pos = {
     "en_salida":        False,   # True cuando hay early exit pendiente de confirmar
     "exit_razon":       None,    # razon del early exit (para el log)
     "exit_intentos":    0,       # cuantos reintentos de venta llevamos
-    "exit_ts_intento":  0.0,     # timestamp del ultimo intento de venta (throttle 5s)
+    "exit_ts_intento":  0.0,     # timestamp del ultimo intento de venta (throttle)
+    "shares_vendidas":  0.0,     # shares vendidas acumuladas (ventas parciales)
+    "exit_usd_total":   0.0,     # USD recibido acumulado de ventas parciales
     "lado1_token_id":   None,    # guardado al comprar — usado en todas las ventas
     "capital_usado":    0.0,
     "ts_entrada":       None,
@@ -694,15 +699,17 @@ async def intentar_early_exit(up_m, dn_m, loop):
     if secs_en_pos < MIN_HOLD_SECS:
         return
 
-    # Verificar que el CLOB ya tiene el balance acreditado antes de intentar vender.
+    # Consultar balance CLOB disponible (read-only)
+    clob_balance = 0.0
     try:
-        ba_params = BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
-        ba = await loop.run_in_executor(None, lambda: clob.get_balance_allowance(ba_params))
+        ba_params    = BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
+        ba           = await loop.run_in_executor(None, lambda: clob.get_balance_allowance(ba_params))
         clob_balance = float(ba.get("balance", 0))
-        if clob_balance < pos["lado1_shares"] * 0.90:
-            return  # silencioso — todavia sincronizando, recheck en siguiente tick
     except Exception:
-        pass  # si falla la consulta, intentar de todas formas
+        pass
+
+    if clob_balance < SELL_MIN_TOKENS:
+        return  # silencioso — todavia sincronizando
 
     # Adaptacion live: el CLOB rechaza ventas de tokens cerca de $1 al final del ciclo.
     # Solo bloquear si AMBAS condiciones: precio alto Y poco tiempo restante (<= 90s).
@@ -721,11 +728,13 @@ async def intentar_early_exit(up_m, dn_m, loop):
     if not razon:
         return
 
-    log_ev(f"EARLY EXIT {lado1} — {razon} — vendiendo al bid {bid_lado1:.4f}")
+    # Vender lo que el CLOB tiene disponible (puede ser parcial)
+    shares_a_vender = round(min(clob_balance * 0.99, pos["lado1_shares"]), 2)
+    log_ev(f"EARLY EXIT {lado1} — {razon} — vendiendo {shares_a_vender:.2f}/{pos['lado1_shares']:.2f} tokens @ {bid_lado1:.4f}")
 
-    exit_precio = await vender_taker(lado1, token_id, bid_lado1, pos["lado1_shares"], loop)
+    exit_precio = await vender_taker(lado1, token_id, bid_lado1, shares_a_vender, loop)
     if exit_precio == 0.0:
-        # Venta fallida — marcar para reintento continuo, NO abandonar la posicion
+        # Venta fallida — marcar para reintento en forzar_salida
         pos["en_salida"]       = True
         pos["exit_razon"]      = razon
         pos["exit_intentos"]   = 1
@@ -734,14 +743,36 @@ async def intentar_early_exit(up_m, dn_m, loop):
         guardar_estado(up_m, dn_m)
         return
 
-    _cerrar_early_exit(lado1, exit_precio, razon, up_m, dn_m)
+    # Acumular venta (puede ser parcial)
+    pos["shares_vendidas"] += shares_a_vender
+    pos["exit_usd_total"]  += round(shares_a_vender * exit_precio, 4)
+    shares_restantes        = round(pos["lado1_shares"] - pos["shares_vendidas"], 4)
+
+    if shares_restantes <= pos["lado1_shares"] * 0.10:
+        _cerrar_early_exit(lado1, exit_precio, razon, up_m, dn_m)
+    else:
+        # Venta parcial exitosa — continuar con forzar_salida para el resto
+        log_ev(f"  Parcial OK: {pos['shares_vendidas']:.2f}/{pos['lado1_shares']:.2f} vendidas | restantes: {shares_restantes:.2f}")
+        pos["en_salida"]       = True
+        pos["exit_razon"]      = razon
+        pos["exit_intentos"]   = 1
+        pos["exit_ts_intento"] = time.time()
+        guardar_estado(up_m, dn_m)
 
 
 # ─── CIERRE DE EARLY EXIT (helper compartido) ────────────────────────────────
 
 def _cerrar_early_exit(lado1: str, exit_precio: float, razon: str, up_m, dn_m):
-    """Contabiliza y registra un early exit confirmado (sell llenado)."""
-    pnl = round(pos["lado1_shares"] * exit_precio - pos["lado1_usd"], 4)
+    """Contabiliza y registra un early exit confirmado (puede incluir ventas parciales)."""
+    # Usar USD acumulado de ventas parciales si existe, sino precio unico * shares
+    if pos["exit_usd_total"] > 0:
+        usd_recibido = pos["exit_usd_total"]
+        precio_log   = round(usd_recibido / pos["shares_vendidas"], 4) if pos["shares_vendidas"] > 0 else exit_precio
+    else:
+        usd_recibido = round(pos["lado1_shares"] * exit_precio, 4)
+        precio_log   = exit_precio
+
+    pnl = round(usd_recibido - pos["lado1_usd"], 4)
 
     estado["capital"]   += pos["lado1_usd"] + pnl
     estado["pnl_total"] += pnl
@@ -752,8 +783,8 @@ def _cerrar_early_exit(lado1: str, exit_precio: float, razon: str, up_m, dn_m):
         estado["losses"] += 1
 
     actualizar_drawdown()
-    log_ev(f"EARLY EXIT {lado1} @ {exit_precio:.4f} | {razon} | PnL: ${pnl:+.4f} | cap=${estado['capital']:.2f}")
-    _registrar_trade("EARLY_EXIT", exit_precio, None, "WIN" if pnl >= 0 else "LOSS", pnl)
+    log_ev(f"EARLY EXIT {lado1} @ {precio_log:.4f} | {razon} | PnL: ${pnl:+.4f} | cap=${estado['capital']:.2f}")
+    _registrar_trade("EARLY_EXIT", precio_log, None, "WIN" if pnl >= 0 else "LOSS", pnl)
     resetear_pos()
     guardar_estado(up_m, dn_m)
 
@@ -763,65 +794,86 @@ def _cerrar_early_exit(lado1: str, exit_precio: float, razon: str, up_m, dn_m):
 async def forzar_salida(up_m, dn_m, loop):
     """
     Llamado cada tick cuando pos["en_salida"]=True.
-    Reintenta la venta cada SELL_RETRY_INTERVAL segundos hasta confirmar el fill.
+    Vende en parciales: cada SELL_RETRY_INTERVAL segundos consulta el balance CLOB
+    y vende lo que haya disponible. Cierra la posicion cuando se vendio >= 90%.
     Bajo ningun concepto resetea la posicion sin haber vendido primero.
 
     Escalado de precio:
-      intentos 1-3  : bid actual           (taker normal)
-      intentos 4-6  : bid - 0.02           (ligeramente agresivo)
-      intentos 7+   : bid - 0.05 (min 0.01) (dump total — garantiza fill)
+      intentos 1-5  : bid actual           (taker normal)
+      intentos 6-10 : bid - 0.02           (ligeramente agresivo)
+      intentos 11+  : bid - 0.05 (min 0.01) (dump total — garantiza fill)
     """
-    # Throttle: solo reintentar cada SELL_RETRY_INTERVAL segundos
+    # Throttle: solo intentar cada SELL_RETRY_INTERVAL segundos
     ahora = time.time()
     if ahora - pos["exit_ts_intento"] < SELL_RETRY_INTERVAL:
         return
 
-    lado1    = pos["lado1_side"]
-    intentos = pos["exit_intentos"]
-    bid_raw  = up_m["best_bid"] if lado1 == "UP" else dn_m["best_bid"]
-    token_id = pos["lado1_token_id"]   # token guardado al comprar, no depende de mkt_global
+    lado1            = pos["lado1_side"]
+    intentos         = pos["exit_intentos"]
+    bid_raw          = up_m["best_bid"] if lado1 == "UP" else dn_m["best_bid"]
+    token_id         = pos["lado1_token_id"]
+    shares_restantes = round(pos["lado1_shares"] - pos["shares_vendidas"], 4)
 
-    # Verificar balance real en el CLOB antes de intentar vender.
-    # get_balance_allowance es read-only — no resetea el cache (a diferencia de update_balance_allowance).
-    # Si el CLOB todavia no ve los tokens, la venta fallaria de todas formas.
+    # Si ya vendimos >= 90%, cerrar la posicion (el resto es dust)
+    if shares_restantes <= pos["lado1_shares"] * 0.10:
+        razon = pos["exit_razon"] or "early_exit"
+        log_ev(f"  Posicion cerrada (dust restante: {shares_restantes:.4f} tokens)")
+        _cerrar_early_exit(lado1, 0.0, razon, up_m, dn_m)
+        return
+
+    # Consultar balance CLOB disponible (read-only — no resetea cache)
+    clob_balance = 0.0
     try:
-        ba_params = BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
-        ba = await loop.run_in_executor(None, lambda: clob.get_balance_allowance(ba_params))
+        ba_params    = BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
+        ba           = await loop.run_in_executor(None, lambda: clob.get_balance_allowance(ba_params))
         clob_balance = float(ba.get("balance", 0))
-        if clob_balance < pos["lado1_shares"] * 0.90:
-            secs_en_pos = ahora - pos["ts_entrada"] if pos["ts_entrada"] else 0
-            log_ev(f"  Balance CLOB aun no listo: {clob_balance:.4f} tokens (esperado ~{pos['lado1_shares']:.4f}) — {secs_en_pos:.0f}s en posicion")
-            pos["exit_ts_intento"] = ahora
-            return
     except Exception:
-        pass  # si falla la consulta, intentar de todas formas
+        pass  # si falla la consulta, clob_balance=0 y se skipea este ciclo
 
-    if intentos <= 3:
+    secs_en_pos = ahora - pos["ts_entrada"] if pos["ts_entrada"] else 0
+
+    if clob_balance < SELL_MIN_TOKENS:
+        log_ev(f"  Balance CLOB: {clob_balance:.4f} tokens disponibles (restantes: {shares_restantes:.4f}) — {secs_en_pos:.0f}s")
+        pos["exit_ts_intento"] = ahora
+        return
+
+    # Vender lo que el CLOB tenga disponible (con factor 0.99 de seguridad)
+    shares_a_vender = round(min(clob_balance * 0.99, shares_restantes), 2)
+
+    if intentos <= 5:
         precio_exit = max(round(bid_raw, 4), 0.01)
-    elif intentos <= 6:
+    elif intentos <= 10:
         precio_exit = max(round(bid_raw - 0.02, 4), 0.01)
     else:
         precio_exit = max(round(bid_raw - 0.05, 4), 0.01)
 
-    log_ev(f"  REINTENTO VENTA #{intentos} {lado1} @ {precio_exit:.4f} (bid={bid_raw:.4f})")
+    log_ev(f"  VENTA PARCIAL #{intentos} {lado1}: {shares_a_vender:.2f}/{shares_restantes:.2f} tokens @ {precio_exit:.4f} (CLOB:{clob_balance:.2f})")
 
-    # Alerta si llevamos demasiados reintentos sin exito
-    if intentos == 6:
-        log_ev(f"  ALERTA: {intentos} reintentos fallidos — posible problema de allowance on-chain")
+    if intentos == 10:
+        log_ev(f"  ALERTA: {intentos} intentos sin cerrar posicion completa")
 
     pos["exit_intentos"]   += 1
     pos["exit_ts_intento"]  = ahora
-    exit_precio = await vender_taker(lado1, token_id, precio_exit, pos["lado1_shares"], loop)
+    exit_precio = await vender_taker(lado1, token_id, precio_exit, shares_a_vender, loop)
 
     if exit_precio == 0.0:
-        if intentos <= 3 or intentos % 5 == 0:
-            log_ev(f"  x Reintento #{intentos} fallido")
+        log_ev(f"  x Parcial #{intentos} fallido")
         guardar_estado(up_m, dn_m)
         return
 
-    razon = pos["exit_razon"] or "early_exit"
-    log_ev(f"  Venta confirmada en reintento #{intentos}")
-    _cerrar_early_exit(lado1, exit_precio, razon, up_m, dn_m)
+    # Acumular venta parcial
+    pos["shares_vendidas"] += shares_a_vender
+    pos["exit_usd_total"]  += round(shares_a_vender * exit_precio, 4)
+    shares_restantes        = round(pos["lado1_shares"] - pos["shares_vendidas"], 4)
+
+    log_ev(f"  Parcial OK: {pos['shares_vendidas']:.2f}/{pos['lado1_shares']:.2f} vendidas | restantes: {shares_restantes:.2f}")
+
+    # Cerrar si vendimos suficiente
+    if shares_restantes <= pos["lado1_shares"] * 0.10:
+        razon = pos["exit_razon"] or "early_exit"
+        _cerrar_early_exit(lado1, exit_precio, razon, up_m, dn_m)
+    else:
+        guardar_estado(up_m, dn_m)
 
 
 # ─── RESOLUCION (identica a hedge_sim.py — Polymarket auto-liquida los ganadores)
