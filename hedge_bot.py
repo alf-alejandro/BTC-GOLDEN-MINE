@@ -545,6 +545,64 @@ async def intentar_entrada(up_m, dn_m, secs, loop) -> bool:
     return True
 
 
+# ─── COMPRA TAKER (Hedge Entry — GTC al ask, fill inmediato) ──────────────────
+
+async def comprar_taker(lado: str, token_id: str, ask: float, loop) -> tuple[float, float, float]:
+    """
+    Taker Entry para hedge: compra al ask, cruza el spread y llena inmediatamente.
+    El hedge es urgente — no podemos esperar un fill maker.
+    Retorna (precio, shares, usd) o (0, 0, 0) si falla.
+    """
+    usd        = USD_POR_LADO
+    precio     = round(ask, 4)
+    shares     = round(usd / precio, 2)
+    if shares < 5.0:
+        shares = 5.0
+    costo_real = round(shares * precio, 4)
+
+    if costo_real > estado["capital"]:
+        log_ev(f"  x Capital insuficiente para hedge: ${estado['capital']:.2f}")
+        return 0.0, 0.0, 0.0
+
+    log_ev(f"  Colocando BUY taker hedge {lado} @ {precio:.4f} | {shares} tokens | ${costo_real:.2f}")
+
+    try:
+        order_args   = OrderArgs(price=precio, size=shares, side=BUY,
+                                 token_id=token_id, fee_rate_bps=1000)
+        signed_order = await loop.run_in_executor(None, clob.create_order, order_args)
+        resp         = await loop.run_in_executor(None, lambda: clob.post_order(signed_order, OrderType.GTC))
+
+        if "orderID" not in resp:
+            log_ev(f"  x API rechazo orden BUY hedge: {resp}")
+            return 0.0, 0.0, 0.0
+
+        order_id = resp["orderID"]
+
+        deadline = time.time() + 10.0
+        while time.time() < deadline:
+            try:
+                order_info = await loop.run_in_executor(None, clob.get_order, order_id)
+                status = order_info.get("status", "") if order_info else ""
+                if status in ("FILLED", "MATCHED"):
+                    log_ev(f"  FILL BUY hedge {lado} @ {precio:.4f} | {shares} tokens | ${costo_real:.2f}")
+                    estado["capital"] -= costo_real
+                    return precio, shares, costo_real
+            except Exception as e:
+                log_ev(f"  Advertencia al consultar hedge: {e}")
+            await asyncio.sleep(1.0)
+
+        log_ev(f"  x Hedge BUY no lleno en 10s")
+        try:
+            await loop.run_in_executor(None, clob.cancel, order_id)
+        except Exception:
+            pass
+        return 0.0, 0.0, 0.0
+
+    except Exception as e:
+        log_ev(f"  x Error en hedge BUY: {e}")
+        return 0.0, 0.0, 0.0
+
+
 # ─── HEDGE LADO 2 (identico a hedge_sim.py v8, con orden real) ────────────────
 
 async def intentar_hedge(up_m, dn_m, loop):
@@ -573,7 +631,7 @@ async def intentar_hedge(up_m, dn_m, loop):
 
     log_ev(f"  Lado1 subio {subida*100:+.1f}c — hedgeando en {lado2} @ bid={bid_lado2:.4f} ask={ask_lado2:.4f}")
 
-    precio, shares, usd = await comprar_live(lado2, token_id, ask_lado2, bid_lado2, loop)
+    precio, shares, usd = await comprar_taker(lado2, token_id, ask_lado2, loop)
     if usd == 0.0:
         return
 
